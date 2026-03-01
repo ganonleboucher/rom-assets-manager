@@ -1324,7 +1324,7 @@ def _progress_ok(
         print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
         cprint(color, msg)
 
-def _fuzzy_rename_pass(
+def _reconcile_art_files(
     existing: dict[str, Path],
     roms: dict[str, Path],
     folder_path: Path,
@@ -1483,7 +1483,7 @@ def _match_libretro_roms(
 
     return matches, no_matches, n_skipped
 
-def _download_clean_covers(
+def _download_covers_without_logo(
     roms_to_dl: list[str],
     covers_path: Path,
     folder: str,
@@ -1563,7 +1563,7 @@ def _find_fallback_url(
         return _try_sgdb() or _try_lb() or None
     return _try_lb() or _try_sgdb() or None
 
-def _download_libretro_covers(
+def _download_art_batch(
     matches:          list[LibretroMatch],
     covers_path:      Path,
     repo_name:        str,
@@ -1812,7 +1812,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
     )
 
     # Step 1 — fuzzy-rename mismatched covers
-    if _fuzzy_rename_pass(covers, roms, covers_path, cfg, counters, orphans):
+    if _reconcile_art_files(covers, roms, covers_path, cfg, counters, orphans):
         covers = {p.stem: p for p in covers_path.iterdir() if p.is_file()}
 
     # Step 2 — downloads
@@ -1842,7 +1842,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
     lb_idx = lb_index or {}  # resolved once; used by all three cover styles below
 
     if cfg.cover_style == "without_logo":
-        _download_clean_covers(roms_to_dl, covers_path, folder, cfg, counters,
+        _download_covers_without_logo(roms_to_dl, covers_path, folder, cfg, counters,
                                failed_covers, lb_index=lb_idx)
         return
 
@@ -1861,7 +1861,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
             cprint(C.GRAY,
                    f"  No libretro repo for {folder} — falling back to LaunchBox Box-Front...")
             if not cfg.dry_run:
-                _download_libretro_covers(
+                _download_art_batch(
                     [], covers_path, repo_name, cfg, counters, failed_covers, folder,
                     lb_folder=_lb_folder, sgdb_fn=None, lb_fallback_finder=_lb_fallback,
                     lb_index=lb_idx, direct_roms=roms_to_dl,
@@ -1873,7 +1873,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
         # game_logo: no Named_Logos for this system; SGDB + LB may still have logos.
         cprint(C.GRAY, f"  No Named_Logos for {folder} — trying SGDB + LaunchBox logos...")
         if not cfg.dry_run:
-            _download_libretro_covers(
+            _download_art_batch(
                 [], covers_path, repo_name, cfg, counters, failed_covers, folder,
                 lb_folder=_lb_folder, sgdb_fn=_sgdb_fn, lb_fallback_finder=_lb_fallback,
                 lb_index=lb_idx, direct_roms=roms_to_dl,
@@ -1921,7 +1921,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
               f"  ->  '{top_name}'  (score: {top_score:.2f}){fallback_note}{region_note}")
 
     if (matches or direct_roms) and not cfg.dry_run:
-        _download_libretro_covers(
+        _download_art_batch(
             matches, covers_path, repo_name, cfg, counters, failed_covers, folder,
             lb_folder=_lb_folder, sgdb_fn=_sgdb_fn, lb_fallback_finder=_lb_fallback,
             lb_index=lb_idx, direct_roms=direct_roms or None,
@@ -1955,7 +1955,7 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
     )
 
     # Step 1 — fuzzy-rename mismatched backgrounds
-    if _fuzzy_rename_pass(bgs, roms, bgs_path, cfg, bg_counters, bg_orphans,
+    if _reconcile_art_files(bgs, roms, bgs_path, cfg, bg_counters, bg_orphans,
                           kind="background"):
         bgs = {p.stem: p for p in bgs_path.iterdir() if p.is_file()}
 
@@ -1999,7 +1999,7 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
         if n_skipped_bg:
             bg_counters.inc("skipped", n_skipped_bg)
         direct_lb = [nm.rom_stem for nm in no_matches_bg]
-        _download_libretro_covers(
+        _download_art_batch(
             matches_bg, bgs_path, repo_name, cfg, bg_counters, failed_bgs, folder,
             lb_folder="Named_Boxarts", lb_fallback_finder=lbdb_find_cover_url,
             sgdb_fn=None, lb_index=lb_idx, direct_roms=direct_lb or None,
@@ -2753,7 +2753,7 @@ def parse_dat(dat_path: Path) -> list[DatGame]:
 
     games: list[DatGame] = []
     for elem in root:
-        if elem.tag not in ("game", "machine"):
+        if elem.tag.lower() not in ("game", "machine"):
             continue
 
         game_name = (elem.get("name") or "").strip()
@@ -2764,7 +2764,7 @@ def parse_dat(dat_path: Path) -> list[DatGame]:
         # Take the first <rom> child with a valid crc attribute.
         crc = ""
         for rom_elem in elem:
-            if rom_elem.tag != "rom":
+            if rom_elem.tag.lower() != "rom":
                 continue
             raw_crc = (rom_elem.get("crc") or "").strip()
             if not raw_crc:
