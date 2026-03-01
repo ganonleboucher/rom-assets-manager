@@ -28,10 +28,8 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -842,8 +840,7 @@ _LBDB_INDEXED_TYPES: frozenset[str] = frozenset((
 def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
     """Parse Metadata.zip bytes into the in-memory index.
     Returns: { normalized_name: { img_type: [(region_key, filename), ...] } }
-    Uses ET.iterparse + zf.open() to stream-decompress each XML file instead
-    of loading the full decompressed bytes into memory first (ET.fromstring).
+    Streams via ET.iterparse + zf.open(); elem.clear() keeps memory bounded.
     """
     index: dict = {}
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -902,13 +899,10 @@ def lbdb_load_index(
     timeout: int = 90,
 ) -> LbIndex:
     """Download + cache LaunchBox Metadata.zip; return in-memory index.
-    Cache: <script_dir>/<script_stem>_launchbox.json  (same pattern as GitHub cache)
-    TTL  : same as --cache-ttl (default 24 h).
     Returns {} on any failure so callers degrade gracefully.
     """
     cache_path = script_dir / f"{script_stem}_launchbox.json"
 
-    # ── Disk cache ───────────────────────────────────────────────────────
     if cache_path.exists():
         try:
             data    = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -917,7 +911,6 @@ def lbdb_load_index(
                 fetched = fetched.replace(tzinfo=timezone.utc)
             age_h = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
             if age_h < ttl_hours:
-                # JSON round-trip: lists-of-lists → tuples
                 index = {
                     name: {t: [tuple(e) for e in es]
                            for t, es in types.items()}
@@ -931,7 +924,6 @@ def lbdb_load_index(
         except Exception:
             cprint(C.GRAY, "  LaunchBox DB: cache unreadable — re-downloading...")
 
-    # ── Download ─────────────────────────────────────────────────────────
     cprint(C.GRAY, "  Downloading LaunchBox Metadata.zip (~150 MB, please wait)...")
     try:
         zip_bytes = _http_get(LBDB_METADATA_URL, None, timeout=timeout)
@@ -939,7 +931,6 @@ def lbdb_load_index(
         cprint(C.YELLOW, f"  WARNING: Could not download LaunchBox DB: {e}")
         return {}
 
-    # ── Parse ────────────────────────────────────────────────────────────
     cprint(C.GRAY, "  Parsing LaunchBox XML...")
     try:
         index = _lbdb_parse_zip(zip_bytes)
@@ -949,7 +940,6 @@ def lbdb_load_index(
 
     cprint(C.GRAY, f"  LaunchBox DB loaded: {len(index):,} games")
 
-    # ── Write cache ──────────────────────────────────────────────────────
     try:
         payload = {"fetched": datetime.now(timezone.utc).isoformat(), "index": index}
         tmp = cache_path.with_suffix(".tmp")
@@ -1030,10 +1020,8 @@ def lbdb_find_bg_url(rom_stem: str, lb_index: LbIndex,
 # =============================================================================
 def _http_get(url: str, token: str | None, bearer: bool = False,
               timeout: int = 30, max_retries: int = 3) -> bytes:
-    """Fetch URL with retry-on-transient-error and optional Bearer/token auth.
-    Retries on: connection errors, HTTP 429 (rate limit), HTTP 5xx.
-    Raises immediately on 4xx (except 429) — permanent client errors.
-    Backoff: 2^attempt seconds (1s, 2s, 4s).
+    """Fetch URL with retry on transient errors and optional Bearer/token auth.
+    Retries on: connection errors, HTTP 429, HTTP 5xx.  Raises on 4xx.  Backoff: 2^attempt s.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "sync-covers-py"})
     if token:
@@ -1063,9 +1051,8 @@ def _http_get(url: str, token: str | None, bearer: bool = False,
 def get_repo_file_list(repo: str, token: str | None,
                        ttl_hours: int, script_dir: Path, script_stem: str,
                        folder_name: str = "Named_Boxarts") -> list[str]:
-    """Fetch the file list for `folder_name` inside a libretro-thumbnails repo.
-    folder_name: "Named_Boxarts" (with_logo) or "Named_Logos" (game_logo).
-    Cache key includes folder so they stay separate.
+    """Fetch the file list for folder_name inside a libretro-thumbnails repo.
+    Cache key includes folder_name so logos and boxarts stay separate.
     """
     # Encode folder_name in cache filename so logos and boxarts cache separately.
     folder_tag = "logos" if folder_name == "Named_Logos" else "boxarts"
@@ -1231,19 +1218,8 @@ class Counters:
 @dataclasses.dataclass(frozen=True)
 class SyncConfig:
     """Immutable settings constant across all system folders in a run.
-    cover_style : "with_logo"    -- libretro-thumbnails (box art, with system logo)
-                                     + LaunchBox GamesDB fallback
-                  "without_logo" -- SteamGridDB clean fan-art covers (no logo)
-                  "game_logo"    -- game logo/title art
-                                     libretro Named_Logos → LaunchBox Clear Logo
-                                     → SteamGridDB Logos (key optional)
-    sgdb_key    : SteamGridDB Bearer token, optional for all styles.
-                  without_logo: SGDB grid (primary) → LB Screenshot-Game-Title
-                  game_logo   : SGDB logo (primary) → libretro → LB Clear Logo
-                  with_logo   : SGDB for backgrounds only (fanart mode)
-    bg_style    : "fanart"  -- SGDB Heroes → LaunchBox Fanart-Background (default)
-                  "boxart"  -- libretro Named_Boxarts → LaunchBox Box-Front,
-                              letterboxed to 1920x1080
+    cover_style: "with_logo" | "without_logo" | "game_logo"
+    bg_style   : "fanart" | "boxart"
     """
     dry_run:          bool
     delete_orphans:   bool
@@ -1334,6 +1310,19 @@ def _run_thread_pool(
             cprint(C.YELLOW, f"\n{interrupt_msg}")
             pool.shutdown(wait=False, cancel_futures=True)
             raise
+
+def _progress_ok(
+    tracker: "_ProgressTracker",
+    lock: "threading.Lock",
+    msg: str,
+    color: str = "",
+) -> None:
+    """Tick tracker, redraw progress bar, then print msg.  Thread-safe."""
+    color = color or C.GREEN
+    dd, dt = tracker.tick()
+    with lock:
+        print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
+        cprint(color, msg)
 
 def _fuzzy_rename_pass(
     existing: dict[str, Path],
@@ -1447,10 +1436,8 @@ def _match_libretro_roms(
     repo_files: list[str],
     cfg: SyncConfig,
 ) -> tuple[list[LibretroMatch], list[LibretroNoMatch], int]:
-    """Match ROMs against the libretro-thumbnails repo. Pure — no I/O or printing.
+    """Match ROMs against the libretro-thumbnails repo.  Pure — no I/O.
     Returns (matches, no_matches, n_skipped).
-    n_skipped: ROMs already covered and skipped (non-zero only in 'missing' mode).
-    Caller is responsible for displaying results and updating counters.
     """
     # Pre-normalise once: avoids re-running regexes for every ROM × every candidate
     norm_cache = build_normalized_candidates(repo_files)
@@ -1525,7 +1512,12 @@ def _download_clean_covers(
 
     def _worker(rom_stem: str) -> None:
         jpg_path = covers_path / f"{rom_stem}.jpg"
-        url = _find_cover_fallback(rom_stem, _lb, cfg)
+        url = _find_fallback_url(
+            rom_stem, _lb, cfg,
+            lb_finder=lbdb_find_screenshot_url,
+            sgdb_fn=sgdb_get_cover_url,
+            sgdb_first=True,
+        )
         if url is None:
             tracker.tick()
             with print_lock:
@@ -1535,10 +1527,7 @@ def _download_clean_covers(
         try:
             raw = _http_get(url, None, timeout=cfg.http_timeout)
             _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
-            dd, dt = tracker.tick()
-            with print_lock:
-                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                cprint(C.GREEN, f"  OK  {rom_stem}")
+            _progress_ok(tracker, print_lock, f"  OK  {rom_stem}")
         except Exception as e:
             tracker.tick()
             with print_lock:
@@ -1558,13 +1547,8 @@ def _find_fallback_url(
     *,
     sgdb_first: bool = False,
 ) -> str | None:
-    """Generic two-source fallback resolver.
-    lb_finder  : one of lbdb_find_*_url — called with (rom_stem, lb_index, region).
-    sgdb_fn    : one of sgdb_get_*_url  — called with (game_id, key).
-                 Pass None to skip SGDB entirely.
-    sgdb_first : when True, SGDB is attempted before lb_finder.
-                 When False (default), lb_finder runs first.
-    SGDB is only attempted when a key is set and sgdb_fn is not None.
+    """Two-source fallback: lb_finder ↔ sgdb_fn.  sgdb_first reverses priority.
+    SGDB is skipped when no key is set or sgdb_fn is None.
     """
     def _try_sgdb() -> str | None:
         if not (sgdb_fn and cfg.sgdb_key):
@@ -1579,19 +1563,6 @@ def _find_fallback_url(
         return _try_sgdb() or _try_lb() or None
     return _try_lb() or _try_sgdb() or None
 
-def _find_cover_fallback(rom_stem: str, lb_index: LbIndex,
-                          cfg: SyncConfig) -> str | None:
-    """Fallback chain for without_logo: SGDB grid → LB Screenshot-Game-Title.
-    Mirrors fanart background priority: SGDB is the primary source when a key
-    is set; LB Screenshot is the fallback (or the only source with no key).
-    """
-    return _find_fallback_url(
-        rom_stem, lb_index, cfg,
-        lb_finder=lbdb_find_screenshot_url,
-        sgdb_fn=sgdb_get_cover_url,
-        sgdb_first=True,
-    )
-
 def _download_libretro_covers(
     matches:          list[LibretroMatch],
     covers_path:      Path,
@@ -1605,14 +1576,11 @@ def _download_libretro_covers(
     sgdb_fn:          "Callable[[int, str], str | None] | None" = None,
     lb_index:         LbIndex | None = None,
     direct_roms:      list[str] | None = None,
+    dims:             str = "512x512",
+    gravity:          str = "center",
 ) -> None:
-    """Download covers using libretro-thumbnails with LB + optional SGDB fallbacks.
-    lb_folder         : libretro subfolder, e.g. "Named_Boxarts" or "Named_Logos".
-    lb_fallback_finder: lbdb_find_*_url to call after libretro candidates exhausted.
-    sgdb_fn           : sgdb_get_*_url to call as the PRIMARY source before libretro
-                        when a key is set. Pass None to skip SGDB entirely.
-    direct_roms       : ROM stems that skip libretro (no repo match) and go
-                        straight to sgdb_fn → lb_fallback_finder.
+    """Download covers/backgrounds via libretro-thumbnails with LB + optional SGDB fallbacks.
+    dims/gravity: passed to _write_and_convert (use 1920x1080/East for boxart backgrounds).
     """
     _direct = direct_roms or []
     lb_idx  = lb_index or {}
@@ -1634,11 +1602,8 @@ def _download_libretro_covers(
                     try:
                         raw = _http_get(sgdb_url, None, timeout=cfg.http_timeout)
                         _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                           cfg.magick, counters)
-                        dd, dt = tracker.tick()
-                        with print_lock:
-                            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                            cprint(C.GREEN, f"  OK (SGDB)  {rom_stem}")
+                                           cfg.magick, counters, dims=dims, gravity=gravity)
+                        _progress_ok(tracker, print_lock, f"  OK (SGDB)  {rom_stem}")
                         return
                     except Exception as e:
                         with print_lock:
@@ -1663,7 +1628,8 @@ def _download_libretro_covers(
                 continue
 
             try:
-                _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
+                _write_and_convert(raw, covers_path, rom_stem, jpg_path,
+                                   cfg.magick, counters, dims=dims, gravity=gravity)
             except subprocess.CalledProcessError:
                 with print_lock:
                     cprint(C.YELLOW,
@@ -1678,16 +1644,14 @@ def _download_libretro_covers(
                 cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
             return  # success — stop trying candidates
 
-        # Step 3: LB fallback — SGDB was already tried at step 1 (if applicable)
+        # Step 3: LB fallback
         _fallback_url = lb_fallback_finder(rom_stem, lb_idx, cfg.preferred_region)
         if _fallback_url:
             try:
                 raw = _http_get(_fallback_url, None, timeout=cfg.http_timeout)
-                _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
-                dd, dt = tracker.tick()
-                with print_lock:
-                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                    cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
+                _write_and_convert(raw, covers_path, rom_stem, jpg_path,
+                                   cfg.magick, counters, dims=dims, gravity=gravity)
+                _progress_ok(tracker, print_lock, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as lbe:
                 with print_lock:
@@ -1715,11 +1679,8 @@ def _download_libretro_covers(
             try:
                 raw = _http_get(url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                   cfg.magick, counters)
-                dd, dt = tracker.tick()
-                with print_lock:
-                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                    cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
+                                   cfg.magick, counters, dims=dims, gravity=gravity)
+                _progress_ok(tracker, print_lock, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as e:
                 with print_lock:
@@ -1738,124 +1699,6 @@ def _download_libretro_covers(
                 fut.result()
         except KeyboardInterrupt:
             cprint(C.YELLOW, "\n  Interrupted — cancelling remaining downloads...")
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
-    print()  # newline after progress bar
-
-def _download_bg_boxart(
-    roms_to_dl: list[str],
-    bgs_path: Path,
-    repo_name: str,
-    repo_files: list[str],
-    folder: str,
-    cfg: SyncConfig,
-    bg_counters: Counters,
-    failed_bgs: list[tuple[str, str, str]],
-    lb_index: LbIndex | None = None,
-) -> None:
-    """Download backgrounds using box art (libretro Named_Boxarts → LaunchBox Box-Front).
-    Images are letterboxed to 1920x1080 by _write_and_convert.
-    """
-    cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} background(s) via box art (libretro + LaunchBox)...")
-
-    if cfg.dry_run:
-        for rom_stem in roms_to_dl:
-            cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (boxart BG)  '{rom_stem}'")
-        return
-
-    lb_idx     = lb_index or {}
-    print_lock = threading.Lock()
-
-    # Match ROMs against libretro repo (Named_Boxarts), same algorithm as covers.
-    matches, no_matches, n_skipped = _match_libretro_roms(
-        roms_to_dl, bgs_path, repo_files, cfg)
-    if n_skipped:
-        bg_counters.inc("skipped", n_skipped)
-
-    # ROMs with no libretro match go straight to the LaunchBox fallback.
-    direct_lb: list[str] = [nm.rom_stem for nm in no_matches]
-    tracker = _ProgressTracker(len(matches) + len(direct_lb), label="BG boxart ")
-
-    def _worker_match(item: LibretroMatch) -> None:
-        rom_stem = item.rom_stem
-        jpg_path = bgs_path / f"{rom_stem}.jpg"
-        for attempt, (match_name, _) in enumerate(item.candidates):
-            url = (f"{BASE_RAW_URL}/{repo_name}/master/Named_Boxarts/"
-                   f"{urllib.parse.quote(match_name)}.png")
-            try:
-                raw = _http_get(url, cfg.github_token, timeout=cfg.http_timeout)
-            except Exception as e:
-                with print_lock:
-                    cprint(C.DRED, f"  FAIL  '{rom_stem}' <- '{match_name}': {e}")
-                continue
-            if not is_valid_png(raw):
-                continue
-            try:
-                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080",
-                                   gravity="East")
-            except Exception:
-                continue
-            dd, dt = tracker.tick()
-            with print_lock:
-                attempt_note = f" (attempt {attempt+1})" if attempt > 0 else ""
-                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
-            return  # success
-        # Libretro exhausted — try LaunchBox Box-Front
-        lb_url = lbdb_find_cover_url(rom_stem, lb_idx, cfg.preferred_region)
-        if lb_url:
-            try:
-                raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
-                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080",
-                                   gravity="East")
-                dd, dt = tracker.tick()
-                with print_lock:
-                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                    cprint(C.GREEN, f"  OK (LaunchBox fallback)  {rom_stem}")
-                return
-            except Exception as e:
-                with print_lock:
-                    cprint(C.GRAY, f"  LaunchBox fallback failed  '{rom_stem}': {e}")
-        dd, dt = tracker.tick()
-        with print_lock:
-            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-            cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
-            failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
-
-    def _worker_direct(rom_stem: str) -> None:
-        """LaunchBox-only worker for ROMs with no libretro match."""
-        jpg_path = bgs_path / f"{rom_stem}.jpg"
-        lb_url   = lbdb_find_cover_url(rom_stem, lb_idx, cfg.preferred_region)
-        if lb_url:
-            try:
-                raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
-                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080",
-                                   gravity="East")
-                dd, dt = tracker.tick()
-                with print_lock:
-                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                    cprint(C.GREEN, f"  OK (LaunchBox)  {rom_stem}")
-                return
-            except Exception as e:
-                with print_lock:
-                    cprint(C.GRAY, f"  LaunchBox failed  '{rom_stem}': {e}")
-        dd, dt = tracker.tick()
-        with print_lock:
-            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-            cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
-            failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
-
-    with ThreadPoolExecutor(max_workers=min(cfg.parallel_jobs, 4)) as pool:
-        futures  = [pool.submit(_worker_match,  m) for m in matches]
-        futures += [pool.submit(_worker_direct, r) for r in direct_lb]
-        try:
-            for fut in as_completed(futures):
-                fut.result()
-        except KeyboardInterrupt:
-            cprint(C.YELLOW, "\n  Interrupted -- cancelling remaining background downloads...")
             pool.shutdown(wait=False, cancel_futures=True)
             raise
     print()  # newline after progress bar
@@ -1930,10 +1773,7 @@ def _download_bg_images(
             raw = _http_get(hero_url, None, timeout=cfg.http_timeout)
             _write_and_convert(raw, bgs_path, rom_stem, jpg_path, cfg.magick, bg_counters,
                                dims="1920x1080")
-            dd, dt = tracker.tick()
-            with print_lock:
-                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
-                cprint(C.GREEN, f"  OK  {rom_stem}")
+            _progress_ok(tracker, print_lock, f"  OK  {rom_stem}")
         except Exception as e:
             tracker.tick()
             with print_lock:
@@ -1955,10 +1795,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
                    orphans: list[str],
                    failed_covers: list[tuple[str, str, str]],
                    lb_index: LbIndex | None = None) -> None:
-    """Process one system folder: rename mismatched covers, then download missing ones.
-    Dispatches to the SGDB (without_logo) or libretro-thumbnails+LaunchBox (with_logo)
-    download pipeline based on cfg.cover_style.
-    """
+    """Process one system folder: rename mismatched covers, download missing ones."""
     cprint(C.CYAN, f"\n=== {folder} ===")
 
     if not roms_path.exists():
@@ -2098,10 +1935,9 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                       lb_index: LbIndex | None = None,
                       repo_files: list[str] | None = None,
                       repo_name: str = "") -> None:
-    """Process one system folder for background art.
+    """Process one system folder for background art.  Always produces 1920x1080 JPEGs.
     bg_style=="fanart": SGDB Heroes → LaunchBox Fanart-Background.
     bg_style=="boxart": libretro Named_Boxarts → LaunchBox Box-Front (letterboxed).
-    Always produces 1920x1080 JPEGs; the resize pass accepts 1280x720 as-is.
     """
     cprint(C.CYAN, f"\n=== {folder} [backgrounds] ===")
 
@@ -2150,14 +1986,24 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
 
     if cfg.bg_style == "boxart":
         if not repo_files:
-            # No libretro repo resolved — fall back to LaunchBox Box-Front directly.
-            # _download_bg_boxart with repo_files=[] routes all ROMs through
-            # _worker_direct → lbdb_find_cover_url (letterboxed to 1920x1080).
             cprint(C.GRAY,
                    f"  No libretro repo for {folder} — falling back to LaunchBox Box-Front...")
-        _download_bg_boxart(
-            roms_to_dl, bgs_path, repo_name, repo_files or [],
-            folder, cfg, bg_counters, failed_bgs, lb_index=lb_index,
+        cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} background(s) via box art (libretro + LaunchBox)...")
+        if cfg.dry_run:
+            for r in roms_to_dl:
+                cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (boxart BG)  '{r}'")
+            return
+        lb_idx = lb_index or {}
+        matches_bg, no_matches_bg, n_skipped_bg = _match_libretro_roms(
+            roms_to_dl, bgs_path, repo_files or [], cfg)
+        if n_skipped_bg:
+            bg_counters.inc("skipped", n_skipped_bg)
+        direct_lb = [nm.rom_stem for nm in no_matches_bg]
+        _download_libretro_covers(
+            matches_bg, bgs_path, repo_name, cfg, bg_counters, failed_bgs, folder,
+            lb_folder="Named_Boxarts", lb_fallback_finder=lbdb_find_cover_url,
+            sgdb_fn=None, lb_index=lb_idx, direct_roms=direct_lb or None,
+            dims="1920x1080", gravity="East",
         )
     else:
         _download_bg_images(roms_to_dl, bgs_path, folder, cfg, bg_counters, failed_bgs,
@@ -2719,14 +2565,7 @@ def _prompt_delete_group(title: str,
 
 # =============================================================================
 # ROM COMPLETENESS CHECKER
-# Verifies a ROM folder against a No-Intro Logiqx XML DAT file.
-#
-# Completely independent of check_duplicates and _hash_file.
-# The two features are intentionally kept separate because they compute CRC32
-# for different purposes:
-#   - check_duplicates: compare ROMs *against each other* → _hash_file (SMC offset)
-#   - check_completeness: compare ROMs against *absolute DAT CRCs* → _dat_crc32
-# Mixing these code paths would silently corrupt both features.
+# Independent of check_duplicates — _hash_file and _dat_crc32 must never mix.
 # =============================================================================
 
 # Extensions supported for DAT CRC matching.  Intentionally narrower than
@@ -2771,11 +2610,7 @@ _SMD_HALF_SIZE:  int = _SMD_BLOCK_SIZE // 2   # 8 KB per half
 @dataclasses.dataclass(frozen=True)
 class DatGame:
     """One cartridge entry from a No-Intro Logiqx XML DAT file.
-
-    Attributes:
-        name:     Full DAT name, e.g. "Super Mario World (USA)".
-        crc32:    Uppercase 8-char zero-padded hex CRC32, e.g. "B19ED489".
-        clone_of: "" if this entry is a parent; parent name if it is a clone.
+    crc32 is uppercase 8-char hex.  clone_of is "" for parents, parent name for clones.
     """
     name:     str
     crc32:    str
@@ -2798,28 +2633,11 @@ def _is_retail(name: str) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# SMD de-interleaving
-# ---------------------------------------------------------------------------
-# Sega Super Magic Drive (SMD) format stores ROM data in interleaved 16 KB blocks.
-# For each 16 KB block the first 8 KB are the odd-addressed bytes of the raw ROM
-# data and the second 8 KB are the even-addressed bytes.  No-Intro Genesis CRCs
-# are computed on the raw (non-interleaved) binary, so the interleaving must be
-# reversed before hashing.
-#
-# This is the only format in scope that requires byte-reordering rather than a
-# simple prefix skip.  De-interleaving is done in memory because Genesis ROMs
-# are bounded (practical maximum ~4 MB), making memory cost acceptable.
-# ---------------------------------------------------------------------------
 def _smd_deinterleave(data: bytes) -> bytes:
     """Convert SMD-interleaved bytes to raw Mega Drive ROM bytes.
 
-    For each 16 KB block:
-      first 8 KB  → odd-addressed bytes of the original ROM
-      second 8 KB → even-addressed bytes of the original ROM
-
-    Uses bytearray extended-slice assignment for O(n) throughput without
-    element-wise Python loops.  Works correctly on partial final blocks.
+    For each 16 KB block: first 8 KB → odd-addressed bytes, second 8 KB → even-addressed.
+    Uses bytearray extended-slice assignment for O(n) throughput.  Works on partial final blocks.
     """
     if not data:
         return b""
@@ -2840,28 +2658,18 @@ def _smd_deinterleave(data: bytes) -> bytes:
 
 # ---------------------------------------------------------------------------
 # DAT-matchable CRC32 computation
-# CRITICAL: Used ONLY by check_completeness.  check_duplicates uses _hash_file
-#           with _smc_header_offset exclusively and must never call this.
+# Used ONLY by check_completeness.  Never call from check_duplicates — the two
+# features compute CRC32 for different purposes (_hash_file vs _dat_crc32).
 # ---------------------------------------------------------------------------
-def _dat_read_magic(path: Path, n: int) -> bytes | None:
-    """Read the first n bytes of path for magic-byte detection.  None on error."""
-    try:
-        with open(path, "rb") as f:
-            return f.read(n)
-    except OSError:
-        return None
-
-
 def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
     """Return the No-Intro DAT-matchable CRC32 for a ROM file, or None on error.
 
-    Header/format handling (by extension):
-      .nes        — strips 16-byte iNES header.  If flags6 bit 2 is set, also
-                    strips the 512-byte trainer that follows the header.
-      .fds        — strips 16-byte fwNES header when magic b"FDS\\x1a" is present.
-      .smc / .sfc — strips 512-byte SMC copier header when size % 1024 == 512.
-      .smd        — strips 512-byte SMD header then de-interleaves 16 KB blocks.
-      all others  — raw CRC32 from byte 0 (no transformation).
+    Strips format-specific headers before hashing:
+      .nes  — 16-byte iNES header; +512-byte trainer when flags6 bit 2 is set.
+      .fds  — 16-byte fwNES header when magic b"FDS\\x1a" is present.
+      .smc/.sfc — 512-byte SMC copier header when size % 1024 == 512.
+      .smd  — 512-byte SMD header, then de-interleaves 16 KB blocks.
+      others — raw CRC32 from byte 0.
 
     Returns uppercase 8-char zero-padded hex (e.g. "B19ED489"), or None on error.
     """
@@ -2886,14 +2694,22 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
 
         if ext == ".nes":
             # iNES magic: b"NES\x1a" at offset 0.  Flags byte at offset 6.
-            hdr = _dat_read_magic(path, 16)
+            try:
+                with open(path, "rb") as _f:
+                    hdr = _f.read(16)
+            except OSError:
+                hdr = None
             if hdr and len(hdr) >= 8 and hdr[:4] == b"NES\x1a":
                 trainer = bool(hdr[6] & 0x04)
                 offset = 16 + (512 if trainer else 0)
 
         elif ext == ".fds":
             # fwNES header: magic b"FDS\x1a" at offset 0, 16 bytes total.
-            hdr = _dat_read_magic(path, 4)
+            try:
+                with open(path, "rb") as _f:
+                    hdr = _f.read(4)
+            except OSError:
+                hdr = None
             if hdr and hdr[:4] == b"FDS\x1a":
                 offset = 16
 
@@ -2920,20 +2736,9 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
 # Logiqx XML DAT parser
 # ---------------------------------------------------------------------------
 def parse_dat(dat_path: Path) -> list[DatGame]:
-    """Parse a No-Intro Logiqx XML DAT file and return a list of DatGame entries.
-
-    Accepts the standard Logiqx schema using <game> or <machine> elements:
-
-        <datafile>
-          <game name="Super Mario World (USA)" [cloneOf="..."]>
-            <rom name="..." crc="b19ed489" .../>
-          </game>
-        </datafile>
-
-    Raises:
-        FileNotFoundError   — dat_path does not exist.
-        xml.etree.ElementTree.ParseError — malformed XML.
-        ValueError          — file is not a Logiqx DAT (wrong root element).
+    """Parse a No-Intro Logiqx XML DAT file; return DatGame list.
+    Accepts <game> or <machine> elements under a <datafile> root.
+    Raises FileNotFoundError, ET.ParseError, or ValueError on bad input.
     """
     tree = ET.parse(dat_path)
     root = tree.getroot()
@@ -2980,15 +2785,8 @@ def parse_dat(dat_path: Path) -> list[DatGame]:
 # 1G1R selection and region filtering
 # ---------------------------------------------------------------------------
 def _build_parent_groups(games: list[DatGame]) -> dict[str, list[DatGame]]:
-    """Group DatGames by their parent entry.  Returns {parent_key: [members]}.
-
-    The group key is:
-      game.clone_of  — if the game is a clone (clone_of != "")
-      game.name      — if the game is a parent (clone_of == "")
-
-    Orphan clones (clone_of points to a parent absent from the retail-filtered
-    list, e.g. the parent was a prototype) form their own single-member group
-    under their own name — they are still valid retail titles.
+    """Group DatGames by their parent entry.  Key is clone_of or the game's own name.
+    Orphan clones (parent absent after retail filter) form single-member groups.
     """
     groups: dict[str, list[DatGame]] = defaultdict(list)
     for game in games:
@@ -2999,13 +2797,8 @@ def _build_parent_groups(games: list[DatGame]) -> dict[str, list[DatGame]]:
 
 def _pick_best_in_group(group: list[DatGame],
                         region_priority: list[str]) -> DatGame:
-    """Select the single best DatGame from a parent group.
-
-    Rank is the index of the game's region in region_priority (0 = best).
-    Games whose region is not in region_priority or is unrecognised rank last.
-    Iteration order is preserved as a tiebreaker — the parent entry (always
-    appended first when building groups from an ordered parse) wins over
-    its clones at equal priority.
+    """Select the best DatGame from a parent group by region_priority index.
+    Games not in priority list rank last; iteration order breaks ties (parent wins).
     """
     priority_index: dict[str, int] = {r: i for i, r in enumerate(region_priority)}
     sentinel = len(region_priority)
@@ -3044,18 +2837,11 @@ def _filter_and_select(
     games: list[DatGame],
     region_mode: str,
 ) -> list[DatGame]:
-    """Apply retail filter, then select entries according to region_mode.
+    """Apply retail filter then select entries by region_mode.
 
-    region_mode values:
-      "usa"             — 1G1R: groups with a USA or World release; prefer USA > WORLD
-      "europe"          — 1G1R: groups with a EUR or World release; prefer EUR > WORLD
-      "japan"           — 1G1R: groups with a JPN or World release; prefer JPN > WORLD
-      "japan_exclusive" — groups where NO member has a USA / EUR / World release
-      "all"             — all retail entries, no 1G1R
-
-    Step 1: apply retail filter to every individual entry.
-    Step 2 (1G1R modes): group by parent, discard ineligible groups, pick best.
-    Step 2 (all mode):   return all retail entries as-is.
+    usa/europe/japan: 1G1R — groups with a matching or World release, best region picked.
+    japan_exclusive:  groups where NO member has a USA/EUR/World release.
+    all:              all retail entries, no 1G1R.
     """
     retail = [g for g in games if _is_retail(g.name)]
 
@@ -3095,14 +2881,9 @@ def check_completeness(
 ) -> None:
     """Check a ROM folder against a No-Intro Logiqx XML DAT file.
 
-    Produces a timestamped CSV report (FOUND / MISSING / UNUSED) next to the
-    script and prints a summary to the terminal.  If want_list=True, also
-    writes a plain-text list of MISSING titles.
-
-    region_mode: "usa" | "europe" | "japan" | "japan_exclusive" | "all"
-
-    This function is entirely independent of check_duplicates.  It never calls
-    _hash_file or _smc_header_offset; all ROM reading goes through _dat_crc32.
+    Writes a timestamped CSV (FOUND/MISSING/UNUSED) next to the script and
+    prints a terminal summary.  want_list=True also writes a plain-text list
+    of MISSING titles.  region_mode: "usa"|"europe"|"japan"|"japan_exclusive"|"all".
     """
     print()
     cprint(C.CYAN, "=============================================")
@@ -3217,13 +2998,8 @@ def _report_completeness(
     safe_system = re.sub(r"[^\w\-]", "_", system_name).strip("_") if system_name else ""
     stem        = f"completeness_{safe_system}_{ts}" if safe_system else f"completeness_{ts}"
     csv_path    = script_dir / f"{stem}.csv"
-    wl_path: Path | None = (
-        script_dir / f"wantlist_{safe_system}_{ts}.txt"
-        if want_list and safe_system
-        else script_dir / f"wantlist_{ts}.txt"
-        if want_list
-        else None
-    )
+    wl_stem     = f"wantlist_{safe_system}_{ts}" if safe_system else f"wantlist_{ts}"
+    wl_path: Path | None = script_dir / f"{wl_stem}.txt" if want_list else None
 
     # ── CSV ──────────────────────────────────────────────────────────────────
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
@@ -3324,12 +3100,7 @@ def _resize_pass(
     label: str = "JPG",
     gravity: str = "center",
 ) -> None:
-    """Resize all JPGs under base that aren't already the right size.
-    target_dims : magick resize target (e.g. '512x512', '1920x1080').
-    valid_dims  : set of already-correct dimension strings; defaults to {target_dims}.
-    label       : display label used in progress messages.
-    gravity     : ImageMagick gravity for canvas placement (see magick_resize).
-    """
+    """Resize all JPGs under base that aren't already the target size."""
     if not cfg.magick:
         return
     if valid_dims is None:
@@ -3366,10 +3137,7 @@ def _resize_pass(
         try:
             magick_resize(cfg.magick, str(jpg), str(jpg), dims=target_dims, gravity=gravity)
             counters.inc("converted")
-            rd, rt = tracker.tick()
-            with print_lock:
-                print(progress_bar(rd, rt, label=tracker.label), end="", flush=True)
-                cprint(C.DCYAN, f"  RESIZED  {jpg}")
+            _progress_ok(tracker, print_lock, f"  RESIZED  {jpg}", color=C.DCYAN)
         except Exception as e:
             tracker.tick()
             with print_lock:
@@ -4116,13 +3884,7 @@ def main() -> None:
     parser.add_argument("--report",           default="",
                         help="Report file path. Defaults to sync-covers_report_YYYYMMDD_HHMMSS.txt "
                              "next to the script. Pass 'none' to disable.")
-    parser.add_argument("--test", action="store_true",
-                        help="Run built-in unit tests and exit")
     args = parser.parse_args()
-
-    if args.test:
-        _run_tests()
-        return   # _run_tests calls sys.exit — this is unreachable but satisfies linters
 
     # Extract credentials immediately and scrub them from args so they don't
     # linger in argparse.Namespace.__repr__ (visible in tracebacks / logs).
@@ -4303,526 +4065,6 @@ def main() -> None:
         script_stem = script_stem,
         report_path = report_path,
     )
-
-# =============================================================================
-# UNIT TESTS
-# Run with: python sync-covers.py --test
-# or:       python -m pytest sync-covers.py  (requires pytest)
-# =============================================================================
-
-
-class TestNormalize(unittest.TestCase):
-    """_TAG_RE, strip_tags, normalize — pure string functions."""
-
-    def test_strip_parens(self):
-        self.assertEqual(strip_tags("Game (USA)"), "Game")
-
-    def test_strip_brackets(self):
-        self.assertEqual(strip_tags("Game [Rev 1]"), "Game")
-
-    def test_strip_multiple(self):
-        self.assertEqual(strip_tags("Game (USA) [Beta]"), "Game")
-
-    def test_normalize_strips_seqnum(self):
-        self.assertEqual(normalize("Game_1"), "Game")
-
-    def test_normalize_preserves_normal(self):
-        self.assertEqual(normalize("Super Mario World"), "Super Mario World")
-
-    def test_normalize_strips_region_and_seq(self):
-        self.assertEqual(normalize("Game (Japan)_2"), "Game")
-
-
-class TestSimilarity(unittest.TestCase):
-    """Core fuzzy matching — no I/O."""
-
-    def test_exact_match(self):
-        self.assertAlmostEqual(similarity("Super Mario World", "Super Mario World"), 1.0)
-
-    def test_case_insensitive(self):
-        self.assertAlmostEqual(similarity("super mario world", "Super Mario World"), 1.0)
-
-    def test_region_tag_ignored(self):
-        s = similarity("Super Mario World (USA)", "Super Mario World")
-        self.assertGreaterEqual(s, 0.95)
-
-    def test_different_games_low_score(self):
-        s = similarity("Zelda Link to the Past", "Super Mario World")
-        self.assertLess(s, 0.5)
-
-    def test_prefix_match(self):
-        s = similarity("Super Mario World (USA)", "Super Mario World (Europe)")
-        self.assertGreaterEqual(s, 0.88)  # normalized-prefix tier
-
-    def test_empty_string(self):
-        self.assertEqual(similarity("", "Super Mario"), 0.0)
-
-
-class TestRegionOf(unittest.TestCase):
-    def test_usa(self):
-        self.assertEqual(region_of("Game (USA)"), "usa")
-
-    def test_europe(self):
-        self.assertEqual(region_of("Game (Europe)"), "europe")
-
-    def test_japan(self):
-        self.assertEqual(region_of("Game (Japan)"), "japan")
-
-    def test_world(self):
-        self.assertEqual(region_of("Game (World)"), "world")
-
-    def test_multi_tag_first_wins(self):
-        # "(Japan, USA)" → first listed = japan
-        self.assertEqual(region_of("Game (Japan, USA)"), "japan")
-
-    def test_no_tag(self):
-        self.assertIsNone(region_of("Game Without Tags"))
-
-    def test_australia_maps_to_europe(self):
-        self.assertEqual(region_of("Game (Australia)"), "europe")
-
-
-class TestProgressTracker(unittest.TestCase):
-    def test_sequential_ticks(self):
-        t = _ProgressTracker(total=3, label="X")
-        self.assertEqual(t.tick(), (1, 3))
-        self.assertEqual(t.tick(), (2, 3))
-        self.assertEqual(t.tick(), (3, 3))
-
-    def test_bulk_tick(self):
-        t = _ProgressTracker(total=10)
-        done, total = t.tick(5)
-        self.assertEqual(done, 5)
-        self.assertEqual(total, 10)
-
-    def test_thread_safety(self):
-        import threading as _t
-        tracker = _ProgressTracker(total=100)
-        results = []
-        lock = _t.Lock()
-
-        def worker():
-            d, _ = tracker.tick()
-            with lock:
-                results.append(d)
-
-        threads = [_t.Thread(target=worker) for _ in range(100)]
-        for th in threads:
-            th.start()
-        for th in threads:
-            th.join()
-        self.assertEqual(sorted(results), list(range(1, 101)))
-
-
-class TestResolveSystemFolder(unittest.TestCase):
-    def test_exact_key(self):
-        repo, tier = resolve_system_folder("snes")
-        self.assertEqual(repo, SYSTEM_MAP["snes"])
-        self.assertEqual(tier, "exact")
-
-    def test_case_insensitive_exact(self):
-        repo, tier = resolve_system_folder("SNES")
-        self.assertEqual(tier, "exact")
-
-    def test_alias(self):
-        repo, tier = resolve_system_folder("Nintendo 64")
-        self.assertEqual(tier, "alias")
-        self.assertEqual(repo, SYSTEM_MAP["n64"])
-
-    def test_unknown_folder(self):
-        repo, tier = resolve_system_folder("unknown_system_xyz")
-        self.assertEqual(repo, "")
-        self.assertEqual(tier, "")
-
-
-class TestCounters(unittest.TestCase):
-    def test_initial_zero(self):
-        c = Counters()
-        for field in ("renamed", "deleted", "missing", "downloaded", "skipped",
-                      "converted", "duplicates"):
-            self.assertEqual(getattr(c, field), 0)
-
-    def test_inc(self):
-        c = Counters()
-        c.inc("downloaded")
-        c.inc("downloaded", 4)
-        self.assertEqual(c.downloaded, 5)
-
-    def test_dec(self):
-        c = Counters()
-        c.inc("downloaded", 3)
-        c.inc("downloaded", -1)
-        self.assertEqual(c.downloaded, 2)
-
-    def test_invalid_field_raises(self):
-        c = Counters()
-        with self.assertRaises(AttributeError):
-            c.inc("nonexistent_field")
-
-
-class TestSMCHeaderOffset(unittest.TestCase):
-    def _make_path(self, suffix: str) -> Path:
-        return Path(f"dummy{suffix}")
-
-    def test_headered_smc(self):
-        # 512-byte header: size % 1024 == 512, extension .smc
-        size = 512 * 1024 + 512   # e.g. 524800
-        self.assertEqual(_smc_header_offset(self._make_path(".smc"), size), 512)
-
-    def test_clean_sfc(self):
-        # No header: size % 1024 == 0
-        size = 512 * 1024
-        self.assertEqual(_smc_header_offset(self._make_path(".sfc"), size), 0)
-
-    def test_wrong_extension(self):
-        size = 512 * 1024 + 512
-        self.assertEqual(_smc_header_offset(self._make_path(".nes"), size), 0)
-
-    def test_tiny_file_not_stripped(self):
-        # size <= 512 must not be stripped (would produce 0 or negative content)
-        self.assertEqual(_smc_header_offset(self._make_path(".smc"), 512), 0)
-
-
-class TestNormFolder(unittest.TestCase):
-    def test_collapses_separators(self):
-        self.assertEqual(_norm_folder("Nintendo_64"), "nintendo 64")
-        self.assertEqual(_norm_folder("Nintendo-64"), "nintendo 64")
-        self.assertEqual(_norm_folder("Nintendo 64"), "nintendo 64")
-
-    def test_strips_edges(self):
-        self.assertEqual(_norm_folder("  snes  "), "snes")
-
-
-class TestIsRetail(unittest.TestCase):
-    """_is_retail — retail filter for DAT entries."""
-
-    def test_clean_game_passes(self):
-        self.assertTrue(_is_retail("Super Mario World (USA)"))
-
-    def test_beta_filtered(self):
-        self.assertFalse(_is_retail("Game (Beta)"))
-
-    def test_beta_with_number_filtered(self):
-        self.assertFalse(_is_retail("Game (Beta 2)"))
-
-    def test_proto_filtered(self):
-        self.assertFalse(_is_retail("Game (Proto)"))
-
-    def test_prototype_filtered(self):
-        self.assertFalse(_is_retail("Game (Prototype)"))
-
-    def test_demo_filtered(self):
-        self.assertFalse(_is_retail("Game (Demo)"))
-
-    def test_sample_filtered(self):
-        self.assertFalse(_is_retail("Game (Sample)"))
-
-    def test_unl_filtered(self):
-        self.assertFalse(_is_retail("Game (Unl)"))
-
-    def test_unlicensed_filtered(self):
-        self.assertFalse(_is_retail("Game (Unlicensed)"))
-
-    def test_bad_dump_filtered(self):
-        self.assertFalse(_is_retail("Game [b]"))
-
-    def test_hack_bracket_filtered(self):
-        self.assertFalse(_is_retail("Game [h C]"))
-
-    def test_trainer_filtered(self):
-        self.assertFalse(_is_retail("Game [t1]"))
-
-    def test_case_insensitive(self):
-        self.assertFalse(_is_retail("Game (BETA)"))
-
-
-class TestSmdDeinterleave(unittest.TestCase):
-    """_smd_deinterleave — SMD byte de-interleaving."""
-
-    def test_empty_input(self):
-        self.assertEqual(_smd_deinterleave(b""), b"")
-
-    def test_known_pattern_single_block(self):
-        """Round-trip verification on one full 16 KB block."""
-        half = _SMD_HALF_SIZE
-        # Original ROM bytes: even positions = 0xAA, odd positions = 0xBB
-        rom_original = bytes([0xAA if i % 2 == 0 else 0xBB
-                               for i in range(_SMD_BLOCK_SIZE)])
-        # SMD layout: first half = odd-addressed bytes, second half = even-addressed
-        odd_half  = bytes([0xBB] * half)
-        even_half = bytes([0xAA] * half)
-        smd_input = odd_half + even_half
-
-        self.assertEqual(_smd_deinterleave(smd_input), rom_original)
-
-    def test_partial_block(self):
-        """Partial final block is handled without crashing or truncating."""
-        # 8 bytes: first 4 = odd half, last 4 = even half
-        smd_input = bytes([0xBB, 0xBB, 0xBB, 0xBB, 0xAA, 0xAA, 0xAA, 0xAA])
-        expected  = bytes([0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB])
-        self.assertEqual(_smd_deinterleave(smd_input), expected)
-
-    def test_output_length_equals_input_length(self):
-        data = bytes(range(256)) * 64   # 16 KB
-        self.assertEqual(len(_smd_deinterleave(data)), len(data))
-
-
-class TestParseDat(unittest.TestCase):
-    """parse_dat — Logiqx XML parsing."""
-
-    _SAMPLE_DAT = """\
-<?xml version="1.0"?>
-<datafile>
-    <game name="Super Mario World (USA)">
-        <rom name="Super Mario World (USA).sfc" size="524288" crc="b19ed489"/>
-    </game>
-    <game name="Super Mario World (Europe)" cloneOf="Super Mario World (USA)">
-        <rom name="Super Mario World (Europe).sfc" size="524288" crc="6810aa95"/>
-    </game>
-    <game name="Alpha Game (Beta)">
-        <rom name="Alpha Game (Beta).sfc" size="1024" crc="deadbeef"/>
-    </game>
-</datafile>
-"""
-
-    def _write_dat(self, content: str) -> Path:
-        fd, fname = tempfile.mkstemp(suffix=".dat")
-        try:
-            os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
-        return Path(fname)
-
-    def test_parse_count(self):
-        p = self._write_dat(self._SAMPLE_DAT)
-        try:
-            games = parse_dat(p)
-            self.assertEqual(len(games), 3)
-        finally:
-            p.unlink()
-
-    def test_crc_normalised_to_uppercase_8char(self):
-        p = self._write_dat(self._SAMPLE_DAT)
-        try:
-            games = parse_dat(p)
-            crcs = {g.crc32 for g in games}
-            self.assertIn("B19ED489", crcs)
-            self.assertIn("6810AA95", crcs)
-            self.assertIn("DEADBEEF", crcs)
-        finally:
-            p.unlink()
-
-    def test_clone_of_set_on_clone(self):
-        p = self._write_dat(self._SAMPLE_DAT)
-        try:
-            games = parse_dat(p)
-            clone = next(g for g in games if "Europe" in g.name)
-            self.assertEqual(clone.clone_of, "Super Mario World (USA)")
-        finally:
-            p.unlink()
-
-    def test_parent_has_empty_clone_of(self):
-        p = self._write_dat(self._SAMPLE_DAT)
-        try:
-            games = parse_dat(p)
-            parent = next(g for g in games if "USA" in g.name)
-            self.assertEqual(parent.clone_of, "")
-        finally:
-            p.unlink()
-
-    def test_invalid_root_raises_value_error(self):
-        bad = '<?xml version="1.0"?><wrongroot><game name="x"><rom crc="00000000"/></game></wrongroot>'
-        p = self._write_dat(bad)
-        try:
-            with self.assertRaises(ValueError):
-                parse_dat(p)
-        finally:
-            p.unlink()
-
-
-class TestFilterAndSelect(unittest.TestCase):
-    """_filter_and_select — retail filter + 1G1R region mode logic."""
-
-    def _make_games(self) -> list[DatGame]:
-        return [
-            # Japan-exclusive: no USA/EUR/WORLD counterpart
-            DatGame("Twinkle Tale (Japan)",  "AAAAAAAA", ""),
-            # Multi-region parent group
-            DatGame("Super Game (USA)",      "BBBBBBBB", ""),
-            DatGame("Super Game (Europe)",   "CCCCCCCC", "Super Game (USA)"),
-            DatGame("Super Game (Japan)",    "DDDDDDDD", "Super Game (USA)"),
-            # World release (standalone parent)
-            DatGame("World Game (World)",    "EEEEEEEE", ""),
-            # Pre-release — must be filtered out
-            DatGame("Bad Game (Beta)",       "FFFFFFFF", ""),
-        ]
-
-    def test_all_mode_keeps_every_retail_entry(self):
-        result = _filter_and_select(self._make_games(), "all")
-        names = [g.name for g in result]
-        self.assertEqual(len(result), 5)           # Beta entry removed
-        self.assertNotIn("Bad Game (Beta)", names)
-
-    def test_usa_mode_picks_usa_from_group(self):
-        result = _filter_and_select(self._make_games(), "usa")
-        names = {g.name for g in result}
-        self.assertIn("Super Game (USA)", names)
-        self.assertNotIn("Super Game (Europe)", names)
-        self.assertNotIn("Super Game (Japan)", names)
-
-    def test_usa_mode_includes_world(self):
-        result = _filter_and_select(self._make_games(), "usa")
-        names = {g.name for g in result}
-        self.assertIn("World Game (World)", names)
-
-    def test_usa_mode_excludes_japan_exclusive(self):
-        result = _filter_and_select(self._make_games(), "usa")
-        names = {g.name for g in result}
-        self.assertNotIn("Twinkle Tale (Japan)", names)
-
-    def test_europe_mode_picks_europe_from_group(self):
-        result = _filter_and_select(self._make_games(), "europe")
-        names = {g.name for g in result}
-        self.assertIn("Super Game (Europe)", names)
-        self.assertNotIn("Super Game (USA)", names)
-
-    def test_japan_exclusive_includes_only_japan_only(self):
-        result = _filter_and_select(self._make_games(), "japan_exclusive")
-        names = {g.name for g in result}
-        # Twinkle Tale has no USA/EUR/WORLD → included
-        self.assertIn("Twinkle Tale (Japan)", names)
-        # Super Game has USA member → disqualified entirely
-        self.assertNotIn("Super Game (Japan)", names)
-        # World Game has World member → disqualified
-        self.assertNotIn("World Game (World)", names)
-
-    def test_retail_filter_applied_before_grouping(self):
-        result = _filter_and_select(self._make_games(), "all")
-        self.assertFalse(any(g.name == "Bad Game (Beta)" for g in result))
-
-    def test_one_entry_per_group_in_1g1r_modes(self):
-        for mode in ("usa", "europe", "japan", "japan_exclusive"):
-            result = _filter_and_select(self._make_games(), mode)
-            # No entry should appear more than once
-            crcs = [g.crc32 for g in result]
-            self.assertEqual(len(crcs), len(set(crcs)), f"Duplicate CRCs in mode '{mode}'")
-
-
-class TestDatCrc32(unittest.TestCase):
-    """_dat_crc32 — header stripping and CRC computation."""
-
-    def _expected_crc(self, data: bytes) -> str:
-        return f"{zlib.crc32(data) & 0xFFFFFFFF:08X}"
-
-    def _write_temp(self, data: bytes, suffix: str) -> Path:
-        fd, fname = tempfile.mkstemp(suffix=suffix)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        return Path(fname)
-
-    def test_nes_header_stripped(self):
-        header  = b"NES\x1a" + b"\x02\x01\x00\x00" + b"\x00" * 8   # 16 bytes, no trainer
-        payload = b"\xAB" * 1024
-        p = self._write_temp(header + payload, ".nes")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_nes_trainer_stripped(self):
-        flags6  = 0x04   # bit 2 set → 512-byte trainer present
-        header  = b"NES\x1a" + bytes([2, 1, flags6, 0]) + b"\x00" * 8
-        trainer = b"\x99" * 512
-        payload = b"\xAB" * 1024
-        p = self._write_temp(header + trainer + payload, ".nes")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_nes_no_magic_not_stripped(self):
-        payload = b"\xCD" * 512
-        p = self._write_temp(payload, ".nes")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_fds_header_stripped(self):
-        header  = b"FDS\x1a" + b"\x00" * 12   # 16 bytes
-        payload = b"\x55" * 512
-        p = self._write_temp(header + payload, ".fds")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_snes_smc_header_stripped(self):
-        # 512-byte copier header: total size = 512 + 512*1024; size % 1024 == 512
-        payload = b"\xBE" * (512 * 1024)
-        p = self._write_temp(b"\x00" * 512 + payload, ".smc")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_snes_clean_sfc_not_stripped(self):
-        payload = b"\xCA" * (512 * 1024)   # size % 1024 == 0 → no header
-        p = self._write_temp(payload, ".sfc")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_gba_no_transformation(self):
-        payload = b"\xDD" * 2048
-        p = self._write_temp(payload, ".gba")
-        try:
-            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
-        finally:
-            p.unlink()
-
-    def test_smd_deinterleaved_before_crc(self):
-        # Build a minimal 1-block SMD file (512-byte header + 16 KB data)
-        smd_header = b"\x00" * 8 + bytes([0xAA, 0xBB]) + b"\x00" * 502   # 512 bytes
-        # Original ROM: sequential bytes
-        half = _SMD_HALF_SIZE
-        rom_original = bytes(range(256)) * (half // 128)   # 8 KB
-        odd_half     = rom_original[1::2] + bytes(half - len(rom_original[1::2]))
-        even_half    = rom_original[0::2] + bytes(half - len(rom_original[0::2]))
-        # Actually build a proper full block: pair original with itself for simplicity
-        rom_full  = bytes(range(256)) * (_SMD_BLOCK_SIZE // 256)   # 16 KB
-        smd_block = rom_full[1::2] + rom_full[0::2]                # interleave
-        smd_file  = smd_header + smd_block
-        p = self._write_temp(smd_file, ".smd")
-        try:
-            result = _dat_crc32(p)
-            expected = self._expected_crc(_smd_deinterleave(smd_block))
-            self.assertEqual(result, expected)
-        finally:
-            p.unlink()
-
-
-def _run_tests() -> None:
-    """Run the built-in unit-test suite and exit with an appropriate code."""
-    import sys as _sys
-    loader  = unittest.TestLoader()
-    suite   = unittest.TestSuite()
-    for cls in (
-        TestNormalize, TestSimilarity, TestRegionOf,
-        TestProgressTracker, TestResolveSystemFolder,
-        TestCounters, TestSMCHeaderOffset, TestNormFolder,
-        # Completeness checker
-        TestIsRetail, TestSmdDeinterleave, TestParseDat,
-        TestFilterAndSelect, TestDatCrc32,
-    ):
-        suite.addTests(loader.loadTestsFromTestCase(cls))
-    runner  = unittest.TextTestRunner(verbosity=2)
-    result  = runner.run(suite)
-    _sys.exit(0 if result.wasSuccessful() else 1)
-
 
 if __name__ == "__main__":
     try:
