@@ -1,73 +1,89 @@
 #!/usr/bin/env python3
 """
-sync-covers.py  --  cross-platform (Linux / macOS / Windows)
-Requires Python 3.8+  --  zero external dependencies
+sync-covers.py  —  sync cover art and backgrounds to your ROM library
+Windows / Linux / macOS  ·  Python 3.8+  ·  no external dependencies
 
-Steps:
-  1. Fuzzy-rename cover files to match ROM filenames.
-  2. Find ROMs that still have no cover.
-  3. Query GitHub API (cached per-console JSON next to this script),
-     fuzzy-match ROM name against available PNGs, download best hit.
-  4. Convert downloaded PNGs -> JPG + resize to 512x512 (parallel).
-  5. Resize-all pass: skip files already at 512x512.
-  6. Optionally delete covers that have no matching ROM.
+─────────────────────────────────────────────────────
+ QUICKSTART
+─────────────────────────────────────────────────────
+  Just run it — the wizard will ask for everything:
 
-Requirements:
-  - Python 3.8+  (pre-installed on Linux/macOS, available on Windows)
-  - ImageMagick  ('magick' on Windows / 'magick' or 'convert' on Linux)
-  - Internet access
-  - GitHub token recommended (60 req/h anon, 5000 req/h auth)
-    Set env var GITHUB_TOKEN or pass --github-token
-
-Usage:
-  Dry run (safe preview, paths prompted):
     python sync-covers.py
 
-  Live run (paths prompted):
-    python sync-covers.py --no-dry-run
+  Nothing is written until you confirm. Use --no-dry-run to apply.
 
-  Fully non-interactive:
-    python sync-covers.py --no-dry-run --roms /data/roms --covers /data/covers
-                          --download-mode missing
+─────────────────────────────────────────────────────
+ COVER STYLES  (--cover-style)
+─────────────────────────────────────────────────────
+  with-logo    Official box art + system logo  (default)
+               libretro-thumbnails → LaunchBox
 
-  Single-system mode:
-    python sync-covers.py --no-dry-run --roms /data/roms/snes
-                          --covers /data/covers/snes --system snes
+  without-logo Clean cover art, no logo
+               SteamGridDB → LaunchBox screenshot  (key optional)
 
-  Also delete orphan covers:
-    python sync-covers.py --no-dry-run --delete-orphans
+  game-logo    Game title / logo art, no box
+               With key:  SteamGridDB → libretro → LaunchBox Clear Logo
+               No key:    libretro → LaunchBox Clear Logo
 
-  With GitHub token:
-    python sync-covers.py --no-dry-run --github-token ghp_xxxx
+─────────────────────────────────────────────────────
+ BACKGROUND STYLES  (--bg-style)
+─────────────────────────────────────────────────────
+  fanart       Hero art at 1920×1080  (default)
+               With key:  SteamGridDB Heroes → LaunchBox Fanart
+               No key:    LaunchBox Fanart-Background only
 
-  Check for duplicate ROMs (all systems):
-    python sync-covers.py --roms /data/roms --check-duplicates
+  boxart       Box art letterboxed to 1920×1080
+               libretro Named_Boxarts → LaunchBox Box-Front
 
-  Check for duplicate ROMs (one system):
-    python sync-covers.py --roms /data/roms --system snes --check-duplicates
+─────────────────────────────────────────────────────
+ EXAMPLES
+─────────────────────────────────────────────────────
+  # First run — let the wizard guide you
+  python sync-covers.py
 
-  Prefer European covers:
-    python sync-covers.py --no-dry-run --download-mode missing --region europe
+  # Download missing box-art covers (Linux/macOS)
+  python sync-covers.py --no-dry-run \
+      --roms ~/retro/roms --covers ~/retro/covers
 
-  Prefer USA covers, fall back gracefully if not available:
-    python sync-covers.py --no-dry-run --download-mode missing --region usa
+  # Game logos + fanart backgrounds in one pass (Linux/macOS)
+  python sync-covers.py --no-dry-run \
+      --roms ~/retro/roms --covers ~/retro/covers \
+      --backgrounds ~/retro/backgrounds \
+      --cover-style game-logo --sgdb-key YOUR_KEY
 
-  Check for duplicates (ROMs directly in folder, no subfolders):
-    python sync-covers.py --roms /data/roms/snes --system snes --check-duplicates
+  # Same on Windows (use ^ to continue lines)
+  python sync-covers.py --no-dry-run ^
+      --roms "E:/tico/roms" --covers "E:/tico/assets/covers" ^
+      --backgrounds "E:/tico/assets/backgrounds" ^
+      --cover-style game-logo --sgdb-key YOUR_KEY
 
-  Clean fan-art covers without console logos (SteamGridDB, requires free API key):
-    python sync-covers.py --no-dry-run --download-mode missing --cover-style without-logo --sgdb-key YOUR_KEY
+  # European covers; falls back to whatever region is available
+  python sync-covers.py --no-dry-run --region europe \
+      --roms ~/retro/roms --covers ~/retro/covers
 
-  Box-art covers with console logo overlay (default behaviour, explicit):
-    python sync-covers.py --no-dry-run --download-mode missing --cover-style with-logo
+  # One system only (ROMs directly in the folder, not in subfolders)
+  python sync-covers.py --no-dry-run --system snes \
+      --roms ~/retro/roms/snes --covers ~/retro/covers/snes
 
-  Sync background images (1920x1080 hero art from SteamGridDB):
-    python sync-covers.py --no-dry-run --download-mode missing --backgrounds /data/backgrounds --sgdb-key YOUR_KEY
+  # Remove covers that have no matching ROM
+  python sync-covers.py --no-dry-run --delete-orphans \
+      --roms ~/retro/roms --covers ~/retro/covers
 
-  Sync covers AND backgrounds in one run:
-    python sync-covers.py --no-dry-run --download-mode missing --cover-style without-logo \\
-                          --backgrounds /data/backgrounds --sgdb-key YOUR_KEY
+─────────────────────────────────────────────────────
+ NOTES
+─────────────────────────────────────────────────────
+  GitHub token   Without one you get 60 API requests/hour (5 000 with).
+                 export GITHUB_TOKEN=ghp_xxxx  or  --github-token ghp_xxxx
+
+  SGDB key       Free at https://www.steamgriddb.com/profile/preferences
+                 export SGDB_KEY=YOUR_KEY  or  --sgdb-key YOUR_KEY
+
+  ImageMagick    Required for image conversion and resizing.
+                 Windows: winget install ImageMagick.Q16-HDRI
+                 Linux:   sudo apt install imagemagick
 """
+
+
 
 from __future__ import annotations
 
@@ -90,6 +106,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -524,7 +541,8 @@ _LBDB_REGION_MAP: dict[str, str] = {
 
 _LBDB_TYPE_COVER = "Box - Front"
 _LBDB_TYPE_BG    = "Fanart - Background"
-_LBDB_TYPE_LOGO  = "Clear Logo"
+_LBDB_TYPE_LOGO       = "Clear Logo"
+_LBDB_TYPE_SCREENSHOT = "Screenshot - Game Title"
 _LBDB_REGION_PRIORITY: list[str] = ["world", "usa", "europe", "japan"]
 
 LbIndex = dict  # normalized_name -> {img_type -> [(region_key, filename)]}
@@ -566,8 +584,11 @@ def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
                 filename = (img.findtext("FileName") or "").strip()
                 img_type = (img.findtext("Type") or "").strip()
                 region   = (img.findtext("Region") or "").strip().lower()
-                if not (db_id and filename
-                        and img_type in (_LBDB_TYPE_COVER, _LBDB_TYPE_BG)):
+                _INDEXED_TYPES = (
+                    _LBDB_TYPE_COVER, _LBDB_TYPE_BG,
+                    _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
+                )
+                if not (db_id and filename and img_type in _INDEXED_TYPES):
                     continue
                 norm = db_id_to_norm.get(db_id)
                 if not norm:
@@ -715,6 +736,12 @@ def lbdb_find_logo_url(rom_stem: str, lb_index: LbIndex,
                        preferred_region: str = "any") -> str | None:
     """Return the best LaunchBox Clear Logo URL for rom_stem, or None."""
     return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_LOGO, preferred_region)
+
+
+def lbdb_find_screenshot_url(rom_stem: str, lb_index: LbIndex,
+                              preferred_region: str = "any") -> str | None:
+    """Return the best LaunchBox Screenshot-Game-Title URL for rom_stem, or None."""
+    return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_SCREENSHOT, preferred_region)
 
 
 def lbdb_find_bg_url(rom_stem: str, lb_index: LbIndex,
@@ -941,7 +968,13 @@ class SyncConfig:
                   "game_logo"    -- game logo/title art
                                      libretro Named_Logos → LaunchBox Clear Logo
                                      → SteamGridDB Logos (key optional)
-    sgdb_key    : SteamGridDB Bearer token, required when cover_style=="without_logo"
+    sgdb_key    : SteamGridDB Bearer token, optional for all styles.
+                  without_logo: SGDB grid (primary) → LB Screenshot-Game-Title
+                  game_logo   : SGDB logo (primary) → libretro → LB Clear Logo
+                  with_logo   : SGDB for backgrounds only (fanart mode)
+    bg_style    : "fanart"  -- SGDB Heroes → LaunchBox Fanart-Background (default)
+                  "boxart"  -- libretro Named_Boxarts → LaunchBox Box-Front,
+                              letterboxed to 1920x1080
     """
     dry_run:          bool
     delete_orphans:   bool
@@ -952,6 +985,7 @@ class SyncConfig:
     github_token:     str | None
     preferred_region: str
     cover_style:      str          # "with_logo" | "without_logo" | "game_logo"
+    bg_style:         str          # "fanart" | "boxart"
     sgdb_key:         str | None   # SteamGridDB API key
     http_timeout:     int          # per-request HTTP timeout in seconds
 
@@ -1153,33 +1187,31 @@ def _match_libretro_roms(
     return matches, no_matches, n_skipped
 
 
-def _download_sgdb_covers(
+def _download_clean_covers(
     roms_to_dl: list[str],
     covers_path: Path,
     folder: str,
     cfg: SyncConfig,
     counters: Counters,
     failed_covers: list[tuple[str, str, str]],
+    lb_index: LbIndex = None,
 ) -> None:
-    """Download cover art from SteamGridDB (without_logo style, requires SGDB key)."""
-    if not cfg.sgdb_key:
-        cprint(C.DYELLOW, "  SGDB key required for 'without_logo' mode.")
-        cprint(C.GRAY,    "  Set SGDB_KEY env var or pass --sgdb-key.")
-        cprint(C.GRAY,    "  Get a free key: https://www.steamgriddb.com/profile/preferences")
-        # All ROMs in this batch get a proper failure entry so the summary is accurate
-        for rom_stem in roms_to_dl:
-            failed_covers.append((folder, rom_stem, "no match: SGDB key required"))
-        return
+    """Download clean cover art for without_logo style.
 
-    is_logo_mode = cfg.cover_style == "game_logo"
-    cprint(C.GRAY, f"  {len(roms_to_dl)} ROM(s) queued for SteamGridDB {"logo" if is_logo_mode else "grid"} download")
+    With SGDB key  : SteamGridDB grid → LaunchBox Screenshot-Game-Title fallback.
+    Without SGDB key: LaunchBox Screenshot-Game-Title only.
+    """
+    _lb = lb_index or {}
+    source_desc = ("SteamGridDB grids → LaunchBox Screenshot fallback"
+                   if cfg.sgdb_key else "LaunchBox Screenshot-Game-Title")
+    cprint(C.GRAY, f"  {len(roms_to_dl)} ROM(s) queued — source: {source_desc}")
 
     if cfg.dry_run:
         for rom_stem in roms_to_dl:
-            cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (SGDB)  '{rom_stem}'")
+            cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (clean cover)  '{rom_stem}'")
         return
 
-    cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} cover(s) via SteamGridDB...")
+    cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} cover(s) via {source_desc}...")
     print_lock = threading.Lock()
     dl_done    = 0
     dl_total   = len(roms_to_dl)
@@ -1189,26 +1221,17 @@ def _download_sgdb_covers(
         nonlocal dl_done
         jpg_path = covers_path / f"{rom_stem}.jpg"
 
-        game_id = sgdb_search_game(rom_stem, cfg.sgdb_key)
-        if game_id is None:
+        url = _find_cover_fallback(rom_stem, _lb, cfg)
+        if url is None:
             with print_lock:
-                cprint(C.DYELLOW, f"  NO SGDB MATCH  '{rom_stem}'")
-                failed_covers.append((folder, rom_stem, "no match: SGDB game not found"))
-            return
-
-        if is_logo_mode:
-            grid_url = sgdb_get_logo_url(game_id, cfg.sgdb_key)
-        else:
-            grid_url = sgdb_get_cover_url(game_id, cfg.sgdb_key)
-        if grid_url is None:
-            with print_lock:
-                kind = "LOGO" if is_logo_mode else "GRID"
-                cprint(C.DYELLOW, f"  NO SGDB {kind}  '{rom_stem}' (game_id={game_id})")
-                failed_covers.append((folder, rom_stem, "no match: SGDB no grid found"))
+                cprint(C.DYELLOW, f"  NO COVER  '{rom_stem}'")
+                failed_covers.append((folder, rom_stem, "no match: no clean cover found"))
+            with dl_lock:
+                dl_done += 1
             return
 
         try:
-            raw = _http_get(grid_url, None, timeout=cfg.http_timeout)
+            raw = _http_get(url, None, timeout=cfg.http_timeout)
             _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
             with dl_lock:
                 dl_done += 1
@@ -1217,38 +1240,102 @@ def _download_sgdb_covers(
                 print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
                 cprint(C.GREEN, f"  OK  {rom_stem}")
         except Exception as e:
+            with dl_lock:
+                dl_done += 1
             with print_lock:
                 cprint(C.DRED, f"  FAIL  '{rom_stem}': {e}")
-                failed_covers.append((folder, rom_stem, f"download failed: SGDB: {e}"))
+                failed_covers.append((folder, rom_stem, f"download failed: {e}"))
 
-    # SGDB makes 2 API calls per ROM (search + grid); cap workers to stay polite
     with ThreadPoolExecutor(max_workers=min(cfg.parallel_jobs, 4)) as pool:
         futures = [pool.submit(_worker, r) for r in roms_to_dl]
         try:
             for fut in as_completed(futures):
                 fut.result()
         except KeyboardInterrupt:
-            cprint(C.YELLOW, "\n  Interrupted -- cancelling remaining SGDB downloads...")
+            cprint(C.YELLOW, "\n  Interrupted -- cancelling remaining downloads...")
             pool.shutdown(wait=False, cancel_futures=True)
             raise
-    print()  # newline after progress bar
+    print()
+
+
+def _find_fallback_url(
+    rom_stem:   str,
+    lb_index:   LbIndex,
+    cfg:        SyncConfig,
+    lb_finder:  "Callable[[str, LbIndex, str], str | None]",
+    sgdb_fn:    "Callable[[int, str], str | None] | None",
+    *,
+    sgdb_first: bool = False,
+) -> str | None:
+    """Generic two-source fallback resolver.
+
+    lb_finder  : one of lbdb_find_*_url — called with (rom_stem, lb_index, region).
+    sgdb_fn    : one of sgdb_get_*_url  — called with (game_id, key).
+                 Pass None to skip SGDB entirely.
+    sgdb_first : when True, SGDB is attempted before lb_finder.
+                 When False (default), lb_finder runs first.
+    SGDB is only attempted when a key is set and sgdb_fn is not None.
+    """
+    def _try_sgdb() -> str | None:
+        if not (sgdb_fn and cfg.sgdb_key):
+            return None
+        game_id = sgdb_search_game(rom_stem, cfg.sgdb_key)
+        return sgdb_fn(game_id, cfg.sgdb_key) if game_id else None
+
+    def _try_lb() -> str | None:
+        return lb_finder(rom_stem, lb_index, cfg.preferred_region)
+
+    if sgdb_first:
+        return _try_sgdb() or _try_lb() or None
+    return _try_lb() or _try_sgdb() or None
+
+
+
+
+def _find_cover_fallback(rom_stem: str, lb_index: LbIndex,
+                          cfg: SyncConfig) -> str | None:
+    """Fallback chain for without_logo: SGDB grid → LB Screenshot-Game-Title.
+
+    Mirrors fanart background priority: SGDB is the primary source when a key
+    is set; LB Screenshot is the fallback (or the only source with no key).
+    """
+    return _find_fallback_url(
+        rom_stem, lb_index, cfg,
+        lb_finder=lbdb_find_screenshot_url,
+        sgdb_fn=sgdb_get_cover_url,
+        sgdb_first=True,
+    )
 
 
 def _download_libretro_covers(
-    matches: list[LibretroMatch],
-    covers_path: Path,
-    repo_name: str,
-    cfg: SyncConfig,
-    counters: Counters,
-    failed_covers: list[tuple[str, str, str]],
-    folder: str,
-    lb_index: LbIndex = None,
+    matches:          list[LibretroMatch],
+    covers_path:      Path,
+    repo_name:        str,
+    cfg:              SyncConfig,
+    counters:         Counters,
+    failed_covers:    list[tuple[str, str, str]],
+    folder:           str,
+    lb_folder:        str,
+    lb_fallback_finder: "Callable[[str, LbIndex, str], str | None]",
+    sgdb_fn:          "Callable[[int, str], str | None] | None" = None,
+    lb_index:         LbIndex = None,
+    direct_roms:      list[str] | None = None,
 ) -> None:
-    """Download covers from libretro-thumbnails with LaunchBox GamesDB fallback."""
-    cprint(C.CYAN, f"  Downloading {len(matches)} cover(s)...")
+    """Download covers using libretro-thumbnails with LB + optional SGDB fallbacks.
+
+    lb_folder         : libretro subfolder, e.g. "Named_Boxarts" or "Named_Logos".
+    lb_fallback_finder: lbdb_find_*_url to call after libretro candidates exhausted.
+    sgdb_fn           : sgdb_get_*_url to call as the PRIMARY source before libretro
+                        when a key is set. Pass None to skip SGDB entirely.
+    direct_roms       : ROM stems that skip libretro (no repo match) and go
+                        straight to sgdb_fn → lb_fallback_finder.
+    """
+    _direct = direct_roms or []
+    lb_idx  = lb_index or {}
+    cprint(C.CYAN, f"  Downloading {len(matches) + len(_direct)} cover(s)...")
     print_lock = threading.Lock()
     dl_done    = 0
-    dl_total   = len(matches)
+    dl_total   = len(matches) + len(_direct)
     dl_lock    = threading.Lock()
 
     def _worker(item: LibretroMatch) -> None:
@@ -1257,9 +1344,28 @@ def _download_libretro_covers(
         jpg_path   = item.jpg_path
         candidates = item.candidates
 
-        # Named_Logos for game_logo style, Named_Boxarts for with_logo
-        lb_folder = ("Named_Logos" if cfg.cover_style == "game_logo"
-                     else "Named_Boxarts")
+        # Step 1: SGDB primary — try before libretro when key is set
+        if sgdb_fn and cfg.sgdb_key:
+            game_id = sgdb_search_game(rom_stem, cfg.sgdb_key)
+            if game_id:
+                sgdb_url = sgdb_fn(game_id, cfg.sgdb_key)
+                if sgdb_url:
+                    try:
+                        raw = _http_get(sgdb_url, None, timeout=cfg.http_timeout)
+                        _write_and_convert(raw, covers_path, rom_stem, jpg_path,
+                                           cfg.magick, counters)
+                        with dl_lock:
+                            dl_done += 1; dd, dt = dl_done, dl_total
+                        with print_lock:
+                            print(progress_bar(dd, dt, label="Downloading "),
+                                  end="", flush=True)
+                            cprint(C.GREEN, f"  OK (SGDB)  {rom_stem}")
+                        return
+                    except Exception as e:
+                        with print_lock:
+                            cprint(C.GRAY, f"  SGDB failed  '{rom_stem}': {e}")
+
+        # Step 2: libretro candidates
         for attempt, (match_name, _) in enumerate(candidates):
             url = (f"{BASE_RAW_URL}/{repo_name}/master/{lb_folder}/"
                    f"{urllib.parse.quote(match_name)}.png")
@@ -1295,30 +1401,25 @@ def _download_libretro_covers(
                 cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
             return  # success — stop trying candidates
 
-        # All libretro candidates exhausted — try LaunchBox GamesDB as last resort
-        if cfg.cover_style == "game_logo":
-            lb_url = lbdb_find_logo_url(rom_stem, lb_index or {}, cfg.preferred_region)
-        else:
-            lb_url = lbdb_find_cover_url(rom_stem, lb_index or {}, cfg.preferred_region)
-        if lb_url:
+        # Step 3: LB fallback — SGDB was already tried at step 1 (if applicable)
+        _fallback_url = lb_fallback_finder(rom_stem, lb_idx, cfg.preferred_region)
+        if _fallback_url:
             try:
-                raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
+                raw = _http_get(_fallback_url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
                 with dl_lock:
-                    dl_done += 1
-                    dd, dt = dl_done, dl_total
+                    dl_done += 1; dd, dt = dl_done, dl_total
                 with print_lock:
                     print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
-                    cprint(C.GREEN, f"  OK (LaunchBox fallback)  {rom_stem}")
+                    cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as lbe:
                 with print_lock:
-                    cprint(C.GRAY, f"  LaunchBox fallback also failed  '{rom_stem}': {lbe}")
+                    cprint(C.GRAY, f"  Fallback download failed  '{rom_stem}': {lbe}")
 
         # All sources exhausted — still count this slot so the bar reaches 100%
         with dl_lock:
-            dl_done += 1
-            dd, dt = dl_done, dl_total
+            dl_done += 1; dd, dt = dl_done, dl_total
         with print_lock:
             print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
             cprint(C.DRED,
@@ -1326,13 +1427,172 @@ def _download_libretro_covers(
             failed_covers.append((folder, rom_stem,
                                   f"download failed ({len(candidates)} candidate(s) tried)"))
 
+    def _worker_direct(rom_stem: str) -> None:
+        """ROMs that skip libretro: try sgdb_fn first, then lb_fallback_finder."""
+        nonlocal dl_done
+        jpg_path = covers_path / f"{rom_stem}.jpg"
+        url = _find_fallback_url(
+            rom_stem, lb_idx, cfg,
+            lb_finder=lb_fallback_finder,
+            sgdb_fn=sgdb_fn,
+            sgdb_first=True,
+        )
+        if url:
+            try:
+                raw = _http_get(url, None, timeout=cfg.http_timeout)
+                _write_and_convert(raw, covers_path, rom_stem, jpg_path,
+                                   cfg.magick, counters)
+                with dl_lock:
+                    dl_done += 1; dd, dt = dl_done, dl_total
+                with print_lock:
+                    print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+                    cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
+                return
+            except Exception as e:
+                with print_lock:
+                    cprint(C.GRAY, f"  Fallback failed  '{rom_stem}': {e}")
+        with dl_lock:
+            dl_done += 1; dd, dt = dl_done, dl_total
+        with print_lock:
+            print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+            cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
+            failed_covers.append((folder, rom_stem, "no match: no image found"))
+
     with ThreadPoolExecutor(max_workers=cfg.parallel_jobs) as pool:
-        futures = [pool.submit(_worker, m) for m in matches]
+        futures  = [pool.submit(_worker, m) for m in matches]
+        futures += [pool.submit(_worker_direct, r) for r in _direct]
         try:
             for fut in as_completed(futures):
                 fut.result()
         except KeyboardInterrupt:
             cprint(C.YELLOW, "\n  Interrupted — cancelling remaining downloads...")
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+    print()  # newline after progress bar
+
+
+def _download_bg_boxart(
+    roms_to_dl: list[str],
+    bgs_path: Path,
+    repo_name: str,
+    repo_files: list[str],
+    folder: str,
+    cfg: SyncConfig,
+    bg_counters: Counters,
+    failed_bgs: list[tuple[str, str, str]],
+    lb_index: LbIndex = None,
+) -> None:
+    """Download backgrounds using box art (libretro Named_Boxarts → LaunchBox Box-Front).
+    Images are letterboxed to 1920x1080 by _write_and_convert.
+    Shares the same matching + fallback logic as covers, only the output
+    path, dimensions, and progress label differ.
+    """
+    cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} background(s) via box art (libretro + LaunchBox)...")
+
+    if cfg.dry_run:
+        for rom_stem in roms_to_dl:
+            cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (boxart BG)  '{rom_stem}'")
+        return
+
+    lb_idx     = lb_index or {}
+    print_lock = threading.Lock()
+    bg_done    = 0
+    bg_total   = len(roms_to_dl)
+    bg_lock    = threading.Lock()
+
+    # Match ROMs against libretro repo (Named_Boxarts), same algorithm as covers.
+    matches, no_matches, n_skipped = _match_libretro_roms(
+        roms_to_dl, bgs_path, repo_files, cfg)
+    if n_skipped:
+        bg_counters.inc("skipped", n_skipped)
+
+    # ROMs with no libretro match go straight to the LaunchBox fallback.
+    direct_lb: list[str] = [nm.rom_stem for nm in no_matches]
+
+    def _worker_match(item: LibretroMatch) -> None:
+        nonlocal bg_done
+        rom_stem   = item.rom_stem
+        jpg_path   = bgs_path / f"{rom_stem}.jpg"
+        for attempt, (match_name, _) in enumerate(item.candidates):
+            url = (f"{BASE_RAW_URL}/{repo_name}/master/Named_Boxarts/"
+                   f"{urllib.parse.quote(match_name)}.png")
+            try:
+                raw = _http_get(url, cfg.github_token, timeout=cfg.http_timeout)
+            except Exception as e:
+                with print_lock:
+                    cprint(C.DRED, f"  FAIL  '{rom_stem}' <- '{match_name}': {e}")
+                continue
+            if not is_valid_png(raw):
+                continue
+            try:
+                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
+                                   cfg.magick, bg_counters, dims="1920x1080")
+            except Exception:
+                continue
+            with bg_lock:
+                bg_done += 1; dd, dt = bg_done, bg_total
+            with print_lock:
+                attempt_note = f" (attempt {attempt+1})" if attempt > 0 else ""
+                print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
+            return  # success
+        # Libretro exhausted — try LaunchBox Box-Front
+        lb_url = lbdb_find_cover_url(rom_stem, lb_idx, cfg.preferred_region)
+        if lb_url:
+            try:
+                raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
+                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
+                                   cfg.magick, bg_counters, dims="1920x1080")
+                with bg_lock:
+                    bg_done += 1; dd, dt = bg_done, bg_total
+                with print_lock:
+                    print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                    cprint(C.GREEN, f"  OK (LaunchBox fallback)  {rom_stem}")
+                return
+            except Exception as e:
+                with print_lock:
+                    cprint(C.GRAY, f"  LaunchBox fallback failed  '{rom_stem}': {e}")
+        with bg_lock:
+            bg_done += 1; dd, dt = bg_done, bg_total
+        with print_lock:
+            print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+            cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
+            failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
+
+    def _worker_direct(rom_stem: str) -> None:
+        """LaunchBox-only worker for ROMs with no libretro match."""
+        nonlocal bg_done
+        jpg_path = bgs_path / f"{rom_stem}.jpg"
+        lb_url   = lbdb_find_cover_url(rom_stem, lb_idx, cfg.preferred_region)
+        if lb_url:
+            try:
+                raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
+                _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
+                                   cfg.magick, bg_counters, dims="1920x1080")
+                with bg_lock:
+                    bg_done += 1; dd, dt = bg_done, bg_total
+                with print_lock:
+                    print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                    cprint(C.GREEN, f"  OK (LaunchBox)  {rom_stem}")
+                return
+            except Exception as e:
+                with print_lock:
+                    cprint(C.GRAY, f"  LaunchBox failed  '{rom_stem}': {e}")
+        with bg_lock:
+            bg_done += 1; dd, dt = bg_done, bg_total
+        with print_lock:
+            print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+            cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
+            failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
+
+    with ThreadPoolExecutor(max_workers=min(cfg.parallel_jobs, 4)) as pool:
+        futures  = [pool.submit(_worker_match,  m) for m in matches]
+        futures += [pool.submit(_worker_direct, r) for r in direct_lb]
+        try:
+            for fut in as_completed(futures):
+                fut.result()
+        except KeyboardInterrupt:
+            cprint(C.YELLOW, "\n  Interrupted -- cancelling remaining background downloads...")
             pool.shutdown(wait=False, cancel_futures=True)
             raise
     print()  # newline after progress bar
@@ -1493,27 +1753,53 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
         return
 
     if cfg.cover_style == "without_logo":
-        _download_sgdb_covers(roms_to_dl, covers_path, folder, cfg, counters, failed_covers)
+        _download_clean_covers(roms_to_dl, covers_path, folder, cfg, counters,
+                               failed_covers, lb_index=lb_idx)
         return
 
-    # with_logo / game_logo: libretro-thumbnails primary, LaunchBox GamesDB fallback
-    # game_logo uses Named_Logos folder; with_logo uses Named_Boxarts.
+    # with_logo / game_logo: libretro-thumbnails primary, LB + optional SGDB fallbacks.
+    lb_idx = lb_index or {}   # hoisted: needed by both the early-exit and normal paths
+    if cfg.cover_style == "game_logo":
+        _lb_folder, _sgdb_fn, _lb_fallback = (
+            "Named_Logos", sgdb_get_logo_url, lbdb_find_logo_url)
+    else:  # with_logo
+        _lb_folder, _sgdb_fn, _lb_fallback = (
+            "Named_Boxarts", None, lbdb_find_cover_url)
+
     if not repo_files:
-        cprint(C.DYELLOW,
-               f"  No repo file list available -- skipping downloads for {folder}")
+        if _sgdb_fn is None:
+            cprint(C.DYELLOW,
+                   f"  No repo file list available -- skipping downloads for {folder}")
+            return
+        # game_logo: no Named_Logos for this system; SGDB + LB may still have logos.
+        cprint(C.GRAY, f"  No Named_Logos for {folder} — trying SGDB + LaunchBox logos...")
+        if not cfg.dry_run:
+            _download_libretro_covers(
+                [], covers_path, repo_name, cfg, counters, failed_covers, folder,
+                lb_folder=_lb_folder, sgdb_fn=_sgdb_fn, lb_fallback_finder=_lb_fallback,
+                lb_index=lb_idx, direct_roms=roms_to_dl,
+            )
+        else:
+            for r in roms_to_dl:
+                cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (SGDB/LB logo)  '{r}'")
         return
 
-    lb_idx = lb_index or {}
     matches, no_matches, n_skipped = _match_libretro_roms(
         roms_to_dl, covers_path, repo_files, cfg)
 
     if n_skipped:
         counters.inc("skipped", n_skipped)
 
-    # Report no-matches
+    # No-libretro-match ROMs: route to direct fallback when a non-libretro
+    # source exists (game_logo has SGDB + LB); mark as failed for with_logo.
+    direct_roms: list[str] = []
     for nm in no_matches:
-        cprint(C.DYELLOW, f"  NO DOWNLOAD MATCH  '{nm.rom_stem}' -- {nm.hint}")
-        failed_covers.append((folder, nm.rom_stem, f"no match: no repo match ({nm.hint})"))
+        if _sgdb_fn is not None:
+            cprint(C.GRAY, f"  No libretro match  '{nm.rom_stem}' — trying SGDB/LB...")
+            direct_roms.append(nm.rom_stem)
+        else:
+            cprint(C.DYELLOW, f"  NO DOWNLOAD MATCH  '{nm.rom_stem}' -- {nm.hint}")
+            failed_covers.append((folder, nm.rom_stem, f"no match: no repo match ({nm.hint})"))
 
     # Report queued
     prefix = f"{C.MAGENTA}  [DRY RUN] {C.RESET}" if cfg.dry_run else "  "
@@ -1535,10 +1821,12 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
         print(f"{prefix}{C.CYAN}QUEUED{C.RESET}  '{m.rom_stem}'"
               f"  ->  '{top_name}'  (score: {top_score:.2f}){fallback_note}{region_note}")
 
-    if matches and not cfg.dry_run:
-        _download_libretro_covers(matches, covers_path, repo_name, cfg,
-                                  counters, failed_covers, folder,
-                                  lb_index=lb_idx)
+    if (matches or direct_roms) and not cfg.dry_run:
+        _download_libretro_covers(
+            matches, covers_path, repo_name, cfg, counters, failed_covers, folder,
+            lb_folder=_lb_folder, sgdb_fn=_sgdb_fn, lb_fallback_finder=_lb_fallback,
+            lb_index=lb_idx, direct_roms=direct_roms or None,
+        )
 
 
 def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
@@ -1546,9 +1834,13 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                       bg_counters: Counters,
                       bg_orphans: list[str],
                       failed_bgs: list[tuple[str, str, str]],
-                      lb_index: LbIndex = None) -> None:
-    """Process one system folder for background art (SGDB Heroes + LaunchBox fallback).
+                      lb_index: LbIndex = None,
+                      repo_files: list[str] | None = None,
+                      repo_name: str = "") -> None:
+    """Process one system folder for background art.
 
+    bg_style=="fanart": SGDB Heroes → LaunchBox Fanart-Background.
+    bg_style=="boxart": libretro Named_Boxarts → LaunchBox Box-Front (letterboxed).
     Always produces 1920x1080 JPEGs; the resize pass accepts 1280x720 as-is.
     """
     cprint(C.CYAN, f"\n=== {folder} [backgrounds] ===")
@@ -1596,8 +1888,18 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                "Install it to enable background processing.")
         return
 
-    _download_bg_images(roms_to_dl, bgs_path, folder, cfg, bg_counters, failed_bgs,
-                        lb_index=lb_index)
+    if cfg.bg_style == "boxart":
+        if not repo_files:
+            cprint(C.DYELLOW,
+                   f"  No repo file list available for boxart BG — skipping downloads for {folder}")
+            return
+        _download_bg_boxart(
+            roms_to_dl, bgs_path, repo_name, repo_files or [],
+            folder, cfg, bg_counters, failed_bgs, lb_index=lb_index,
+        )
+    else:
+        _download_bg_images(roms_to_dl, bgs_path, folder, cfg, bg_counters, failed_bgs,
+                            lb_index=lb_index)
 
 
 # =============================================================================
@@ -2029,6 +2331,8 @@ def _print_summary(
         print()
         cprint(C.CYAN, "=============================================")
         cprint(C.CYAN, "  BACKGROUNDS SUMMARY")
+        _BG_STYLE_LABELS = {"fanart": "Fanart/Heroes", "boxart": "Box art (letterboxed)"}
+        cprint(C.CYAN, f"  BG source          : {_BG_STYLE_LABELS.get(cfg.bg_style, cfg.bg_style)}")
         cprint(C.CYAN, "=============================================")
         cprint(C.YELLOW,  f"  Renamed (or would) : {bg_counters.renamed}")
         if bg_counters.duplicates:
@@ -2161,17 +2465,31 @@ def _run_sync(
         print()
         cprint(C.CYAN, "=============================================")
         cprint(C.CYAN, "  BACKGROUND SYNC")
-        if not cfg.sgdb_key:
+        if cfg.bg_style == "boxart":
+            cprint(C.GRAY, "  (source: box art, letterboxed to 1920x1080)")
+        elif not cfg.sgdb_key:
             cprint(C.GRAY, "  (no SGDB key — LaunchBox Fanart-Background only)")
         cprint(C.CYAN, "=============================================")
 
         for folder in common:
             roms_path = roms_base if single_system else roms_base / folder
             bgs_path  = bgs_base  if single_system else bgs_base  / folder
+            bg_repo_name:  str       = ""
+            bg_repo_files: list[str] = []
+            if cfg.bg_style == "boxart" and cfg.download_mode != "skip":
+                bg_repo_name = SYSTEM_MAP.get(folder.lower(), "")
+                if bg_repo_name:
+                    bg_repo_files = get_repo_file_list(
+                        bg_repo_name, cfg.github_token, cache_ttl,
+                        script_dir, script_stem,
+                        folder_name="Named_Boxarts",
+                    )
             process_bg_folder(
                 folder, roms_path, bgs_path,
                 cfg, bg_counters, bg_orphans, failed_bgs,
                 lb_index=lb_index,
+                repo_files=bg_repo_files,
+                repo_name=bg_repo_name,
             )
 
         if cfg.delete_orphans and bg_orphans:
@@ -2244,24 +2562,19 @@ def _wiz_confirm(dry_run: bool, task: str, opts: dict[str, str]) -> None:
 def _prompt_sgdb_key(existing: str, required: bool = False) -> str | None:
     """Prompt for SteamGridDB API key.
 
-    required=False (default): optional, used for backgrounds.
-      Returns "" (empty string) if skipped — caller treats as "no key".
-    required=True: cover without_logo mode.
-      Returns None if skipped — caller treats as "cannot proceed".
+    required=False (default): key is optional; returns "" if skipped.
+    required=True: legacy — warns more strongly but still allows skipping.
     """
     if existing:
         cprint(C.GREEN, "  SGDB key     : set (from env/--sgdb-key)")
         return existing
     print()
+    cprint(C.YELLOW, "  SteamGridDB API key not set.")
+    cprint(C.GRAY,   "  Get a free key: https://www.steamgriddb.com/profile/preferences")
     if required:
-        cprint(C.YELLOW, "  SteamGridDB API key required for 'without logo' covers.")
-        cprint(C.GRAY,   "  Get a free key: https://www.steamgriddb.com/profile/preferences")
-        cprint(C.GRAY,   "  Leave blank — covers will be skipped for systems without a key.")
+        cprint(C.GRAY, "  Without a key, SGDB will be skipped (LaunchBox fallback still works).")
     else:
-        cprint(C.YELLOW, "  SteamGridDB API key not set.")
-        cprint(C.GRAY,   "  Without a key, backgrounds fall back to LaunchBox Fanart only.")
-        cprint(C.GRAY,   "  Get a free key: https://www.steamgriddb.com/profile/preferences")
-        cprint(C.GRAY,   "  Leave blank to use LaunchBox only.")
+        cprint(C.GRAY, "  Leave blank to use LaunchBox only.")
     print()
     prompt = "  Enter SGDB key: " if required else "  Enter SGDB key (or press Enter to skip): "
     try:
@@ -2275,20 +2588,21 @@ def _wiz_cover_options(
     need_covers: bool,
     need_bgs:    bool,
     sgdb_key:    str,
-) -> tuple[str, str, str]:
-    """Wizard steps 8-9: prompt for cover style, region, and SGDB key.
+) -> tuple[str, str, str, str]:
+    """Wizard steps 8-9: prompt for cover style, region, bg style, and SGDB key.
 
-    Returns (cover_style, preferred_region, sgdb_key).
-    Contains all branching logic for the three cover styles so _wizard
+    Returns (cover_style, preferred_region, sgdb_key, bg_style).
+    Contains all branching logic for cover and background styles so _wizard
     stays at a high level.
     """
     cover_style      = "with_logo"
     preferred_region = "any"
+    bg_style         = "fanart"
 
     if need_covers:
         style_ch = prompt_choice("  Cover art style:", {
             "1": f"{C.GREEN}With logo{C.RESET}      — official box art        (libretro-thumbnails + LaunchBox)",
-            "2": f"{C.CYAN}Without logo{C.RESET}   — clean fan-art            (SteamGridDB — API key required)",
+            "2": f"{C.CYAN}Without logo{C.RESET}   — clean fan-art            (SteamGridDB → LB Screenshot, key optional)",
             "3": f"{C.YELLOW}Game logo{C.RESET}      — title/logo art, no box  (libretro + LaunchBox + SGDB optional)",
         })
         cover_style = {"1": "with_logo", "2": "without_logo", "3": "game_logo"}[style_ch]
@@ -2309,21 +2623,30 @@ def _wiz_cover_options(
                 sgdb_key = _prompt_sgdb_key(sgdb_key, required=False) or ""
                 print()
         else:
-            # without_logo: SGDB is the only source — key is required
-            sgdb_key = _prompt_sgdb_key(sgdb_key, required=True) or ""
+            # without_logo: SGDB grids → LB Screenshot fallback. Key is optional.
+            sgdb_key = _prompt_sgdb_key(sgdb_key, required=False) or ""
             print()
 
+    # ── Background art style ──────────────────────────────────────────────
+    if need_bgs:
+        bg_ch = prompt_choice("  Background art style:", {
+            "1": f"{C.GREEN}Fanart{C.RESET}         — SGDB Heroes → LaunchBox Fanart-Background",
+            "2": f"{C.YELLOW}Box art{C.RESET}        — official box art, letterboxed to 1920x1080",
+        })
+        bg_style = {"1": "fanart", "2": "boxart"}[bg_ch]
+        print()
+
     # Step 9: SGDB key for backgrounds.
-    # Only ask when the user has not been prompted yet.
-    # - with_logo  : no SGDB prompt above → ask here if backgrounds needed
-    # - without_logo: already prompted (required) → sgdb_key is set; condition false
-    # - game_logo  : already prompted (optional) → user may have skipped, but asking
-    #                again would be confusing; skip regardless of whether they set it
-    if need_bgs and not sgdb_key and cover_style == "with_logo":
+    # Only ask when fanart mode AND cover style has not already prompted for a key.
+    # - with_logo + fanart  : no SGDB prompt above → ask here
+    # - with_logo + boxart  : boxart uses libretro/LB, SGDB not needed for bgs
+    # - without_logo        : already prompted (optional) → skip
+    # - game_logo           : already prompted (optional) → skip
+    if need_bgs and not sgdb_key and cover_style == "with_logo" and bg_style == "fanart":
         sgdb_key = _prompt_sgdb_key(sgdb_key)
         print()
 
-    return cover_style, preferred_region, sgdb_key
+    return cover_style, preferred_region, sgdb_key, bg_style
 
 
 def _wiz_build_confirm_opts(
@@ -2337,6 +2660,8 @@ def _wiz_build_confirm_opts(
     sgdb_key:         str,
     delete_orphans:   bool,
     report_path:      "Path | None",
+    bg_style:         str = "fanart",
+    need_bgs:         bool = False,
 ) -> dict[str, str]:
     """Assemble the ordered confirmation summary dict for _wiz_confirm.
 
@@ -2357,6 +2682,8 @@ def _wiz_build_confirm_opts(
         opts["Style"] = _STYLE_CONFIRM.get(cover_style, cover_style)
     if need_covers and cover_style in ("with_logo", "game_logo") and preferred_region != "any":
         opts["Region"] = REGION_LABELS.get(preferred_region, preferred_region)
+    if need_bgs:
+        opts["BG style"] = "box art (letterboxed)" if bg_style == "boxart" else "fanart/heroes"
     if sgdb_key:
         opts["SGDB key"] = "set"
     opts["Delete orphans"] = "yes" if delete_orphans else "no"
@@ -2448,7 +2775,7 @@ def _wizard(
 
     # ── 8-9. Cover style, region, SGDB key ──────────────────────────────
     sgdb_key = (args.sgdb_key or "").strip()
-    cover_style, preferred_region, sgdb_key = _wiz_cover_options(
+    cover_style, preferred_region, sgdb_key, bg_style = _wiz_cover_options(
         need_covers, need_bgs, sgdb_key
     )
 
@@ -2488,6 +2815,8 @@ def _wizard(
         sgdb_key         = sgdb_key,
         delete_orphans   = delete_orphans,
         report_path      = report_path,
+        bg_style         = bg_style,
+        need_bgs         = need_bgs,
     )
     _wiz_confirm(dry_run, task_label, confirm_opts)
 
@@ -2507,6 +2836,7 @@ def _wizard(
         github_token     = token,
         preferred_region = preferred_region,
         cover_style      = cover_style,
+        bg_style         = bg_style,
         sgdb_key         = sgdb_key or None,
         http_timeout     = args.http_timeout,
     )
@@ -2556,7 +2886,10 @@ def main() -> None:
                         help="Download behaviour (default: missing)")
     parser.add_argument("--cover-style",      default="with-logo",
                         choices=["with-logo", "without-logo", "game-logo"],
-                        help="Cover art style: with-logo (box art), without-logo (SGDB clean art), game-logo (title art)")
+                        help="Cover art style: with-logo (box art), without-logo (SGDB grids → LB Screenshot, key optional), game-logo (title art)")
+    parser.add_argument("--bg-style",         default="fanart",
+                        choices=["fanart", "boxart"],
+                        help="Background art style: fanart (SGDB Heroes/LB Fanart) or boxart (box art letterboxed to 1920x1080)")
     parser.add_argument("--region",           default="any",
                         choices=["any", "usa", "europe", "japan", "world"],
                         help="Preferred cover region (default: any)")
@@ -2677,6 +3010,9 @@ def main() -> None:
             "game_logo":    "game logo",
         }
         cprint(C.CYAN, f"  Style       : {_STYLE_LABELS_CLI.get(cover_style, cover_style)}")
+    if task in ("backgrounds", "both"):
+        _BG_STYLE_LABELS_CLI = {"fanart": "fanart/heroes", "boxart": "box art (letterboxed)"}
+        cprint(C.CYAN, f"  BG style    : {_BG_STYLE_LABELS_CLI.get(args.bg_style, args.bg_style)}")
     if preferred_region != "any":
         cprint(C.CYAN, f"  Region      : {REGION_LABELS.get(preferred_region, preferred_region)}")
     cprint(C.GREEN if sgdb_key else C.GRAY,
@@ -2706,6 +3042,7 @@ def main() -> None:
         github_token     = token,
         preferred_region = preferred_region,
         cover_style      = cover_style,
+        bg_style         = args.bg_style,
         sgdb_key         = sgdb_key,
         http_timeout     = args.http_timeout,
     )
