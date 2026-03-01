@@ -709,11 +709,14 @@ def magick_resize(magick: str, src: str, dst: str,
     )
 
 def batch_identify(magick: str, jpg_list: list[Path],
-                   chunk_size: int = 200) -> dict[Path, str | None]:
+                   chunk_size: int = 200,
+                   label: str = "Identifying") -> dict[Path, str | None]:
     """Return {path: 'WxH' | None} for every jpg in jpg_list.
     Chunks into batches of chunk_size to stay within Windows 32k CLI limit."""
     dims_map: dict[Path, str | None] = {p: None for p in jpg_list}
-    for i in range(0, len(jpg_list), chunk_size):
+    total = len(jpg_list)
+    done  = 0
+    for i in range(0, total, chunk_size):
         chunk = jpg_list[i : i + chunk_size]
         result = subprocess.run(
             [magick, "identify", "-format", "%i %wx%h\n"] + [str(p) for p in chunk],
@@ -727,6 +730,10 @@ def batch_identify(magick: str, jpg_list: list[Path],
                     # slashes on Windows while dims_map keys use Path objects
                     # with backslashes.  Path(s) normalizes on construction.
                     dims_map[Path(parts[0])] = parts[1].strip()
+        done = min(i + chunk_size, total)
+        print(progress_bar(done, total, label=label), end="", flush=True)
+    if total:
+        print()  # newline after progress bar
     return dims_map
 
 # =============================================================================
@@ -3122,7 +3129,7 @@ def _resize_pass(
     })
     cprint(C.CYAN, f"\n--- Checking {len(all_jpgs)} {label}(s) for resize (target {target_dims}) ---")
 
-    dims_map         = batch_identify(cfg.magick, all_jpgs)
+    dims_map         = batch_identify(cfg.magick, all_jpgs, label="Identifying")
     needs_resize:     list[Path] = []
     identify_skipped: int        = 0
     for jpg, dims in dims_map.items():
