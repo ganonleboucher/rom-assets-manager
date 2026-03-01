@@ -147,39 +147,348 @@ class ReportTee:
 # SYSTEM MAP  --  local folder name -> libretro-thumbnails repo name
 # =============================================================================
 SYSTEM_MAP = {
-    "32x":             "Sega_-_32X",
-    "3ds":             "Nintendo_-_Nintendo_3DS",
-    "atari2600":       "Atari_-_2600",
-    "atari7800":       "Atari_-_7800",
-    "dc":              "Sega_-_Dreamcast",
-    "ds":              "Nintendo_-_Nintendo_DS",
-    "gba":             "Nintendo_-_Game_Boy_Advance",
-    "gbc":             "Nintendo_-_Game_Boy_Color",
-    "gb":              "Nintendo_-_Game_Boy",
-    "gamecube":        "Nintendo_-_GameCube",
-    "game-gear":       "Sega_-_Game_Gear",
-    "genesis":         "Sega_-_Mega_Drive_-_Genesis",
-    "megadrive":       "Sega_-_Mega_Drive_-_Genesis",
-    "pce":             "NEC_-_PC_Engine_-_TurboGrafx_16",
-    "pcengine":        "NEC_-_PC_Engine_-_TurboGrafx_16",
-    "lynx":            "Atari_-_Lynx",
-    "master-system":   "Sega_-_Master_System_-_Mark_III",
-    "n64":             "Nintendo_-_Nintendo_64",
-    "nes":             "Nintendo_-_Nintendo_Entertainment_System",
-    "neogeo":          "SNK_-_Neo_Geo",
-    "ngp":             "SNK_-_Neo_Geo_Pocket",
-    "ngpc":            "SNK_-_Neo_Geo_Pocket_Color",
-    "psx":             "Sony_-_PlayStation",
-    "ps2":             "Sony_-_PlayStation_2",
-    "psp":             "Sony_-_PlayStation_Portable",
-    "saturn":          "Sega_-_Saturn",
-    "sega-cd":         "Sega_-_Mega-CD_-_Sega_CD",
-    "snes":            "Nintendo_-_Super_Nintendo_Entertainment_System",
-    "virtualboy":      "Nintendo_-_Virtual_Boy",
-    "wii":             "Nintendo_-_Wii",
-    "wonderswan":      "Bandai_-_WonderSwan",
-    "wonderswancolor": "Bandai_-_WonderSwan_Color",
+    # ── Nintendo ──────────────────────────────────────────────────────────
+    "nes":              "Nintendo_-_Nintendo_Entertainment_System",
+    "fds":              "Nintendo_-_Family_Computer_Disk_System",
+    "snes":             "Nintendo_-_Super_Nintendo_Entertainment_System",
+    "virtualboy":       "Nintendo_-_Virtual_Boy",
+    "n64":              "Nintendo_-_Nintendo_64",
+    "gamecube":         "Nintendo_-_GameCube",
+    "wii":              "Nintendo_-_Wii",
+    "wiiu":             "Nintendo_-_Wii_U",
+    "gb":               "Nintendo_-_Game_Boy",
+    "gbc":              "Nintendo_-_Game_Boy_Color",
+    "gba":              "Nintendo_-_Game_Boy_Advance",
+    "ds":               "Nintendo_-_Nintendo_DS",
+    "3ds":              "Nintendo_-_Nintendo_3DS",
+    # ── Sega ──────────────────────────────────────────────────────────────
+    "genesis":          "Sega_-_Mega_Drive_-_Genesis",
+    "megadrive":        "Sega_-_Mega_Drive_-_Genesis",   # alias
+    "32x":              "Sega_-_32X",
+    "sega-cd":          "Sega_-_Mega-CD_-_Sega_CD",
+    "game-gear":        "Sega_-_Game_Gear",
+    "master-system":    "Sega_-_Master_System_-_Mark_III",
+    "saturn":           "Sega_-_Saturn",
+    "dc":               "Sega_-_Dreamcast",
+    # ── Sony ──────────────────────────────────────────────────────────────
+    "psx":              "Sony_-_PlayStation",
+    "ps2":              "Sony_-_PlayStation_2",
+    "ps3":              "Sony_-_PlayStation_3",
+    "ps4":              "Sony_-_PlayStation_4",
+    "psp":              "Sony_-_PlayStation_Portable",
+    # ── Atari ─────────────────────────────────────────────────────────────
+    "atari2600":        "Atari_-_2600",
+    "atari5200":        "Atari_-_5200",
+    "atari7800":        "Atari_-_7800",
+    "atari-st":         "Atari_-_ST",
+    "atarist":          "Atari_-_ST",                    # alias (no hyphen)
+    "jaguar":           "Atari_-_Jaguar",
+    "lynx":             "Atari_-_Lynx",
+    # ── NEC ───────────────────────────────────────────────────────────────
+    "pce":              "NEC_-_PC_Engine_-_TurboGrafx_16",
+    "pcengine":         "NEC_-_PC_Engine_-_TurboGrafx_16",  # alias
+    "pce-cd":           "NEC_-_PC_Engine_CD_-_TurboGrafx-CD",
+    "pcecd":            "NEC_-_PC_Engine_CD_-_TurboGrafx-CD",  # alias
+    # ── SNK ───────────────────────────────────────────────────────────────
+    "neogeo":           "SNK_-_Neo_Geo",
+    "neogeocd":         "SNK_-_Neo_Geo_CD",
+    "ngp":              "SNK_-_Neo_Geo_Pocket",
+    "ngpc":             "SNK_-_Neo_Geo_Pocket_Color",
+    # ── Bandai ────────────────────────────────────────────────────────────
+    "wonderswan":       "Bandai_-_WonderSwan",
+    "wonderswancolor":  "Bandai_-_WonderSwan_Color",
+    # ── Coleco / GCE / Microsoft / Sharp ──────────────────────────────────
+    "coleco":           "Coleco_-_ColecoVision",
+    "colecovision":     "Coleco_-_ColecoVision",         # alias
+    "vectrex":          "GCE_-_Vectrex",
+    "msx":              "Microsoft_-_MSX",
+    "msx2":             "Microsoft_-_MSX2",
+    "x68000":           "Sharp_-_X68000",
+    # ── Multi-system ──────────────────────────────────────────────────────
+    "scummvm":          "ScummVM",
 }
+
+# ---------------------------------------------------------------------------
+# Folder-name resolver — three-tier lookup used by the sync loop to map an
+# arbitrary ROM folder name to a libretro-thumbnails repo name.
+#
+# Tier 1 — exact:   folder.lower() is a key in SYSTEM_MAP (e.g. "snes", "n64")
+# Tier 2 — alias:   _norm_folder(folder) matches FOLDER_ALIASES, which maps the
+#                   ~100 most common naming variants (long-form names, spaces,
+#                   EmulationStation / Batocera / Recalbox conventions…) to a
+#                   SYSTEM_MAP key. The normaliser collapses separators so
+#                   "Nintendo_64", "Nintendo-64", "Nintendo 64" all hit the same entry.
+# Tier 3 — content: inspect the files inside the folder:
+#   3a. Extension profiling: unambiguous extensions (e.g. .z64, .gba) are counted;
+#       the system with ≥60% of votes wins. Ambiguous extensions (.bin, .iso, .chd,
+#       .cue, .img, .ecm, .rom) are skipped at this step.
+#   3b. Header sniffing: if profiling fails (e.g. all files are .bin), read the first
+#       ~300 bytes of up to 5 files and match known ROM magic signatures. Only used
+#       as a last resort; capped to bound I/O cost on large collections.
+#
+# A gray info line is printed for alias and content matches.
+# Unresolved folders fall through to SGDB/LaunchBox only (no crash, no silent skip).
+# ---------------------------------------------------------------------------
+
+# Normalised variant → SYSTEM_MAP key.
+# Keys are already normalised: lowercase, non-alphanumeric collapsed to space.
+FOLDER_ALIASES: dict[str, str] = {
+    # NES / Famicom
+    "nintendo entertainment system": "nes",
+    "famicom":                        "nes",
+    "fc":                             "nes",
+    "famicom disk system":            "fds",
+    # SNES
+    "super nintendo":                        "snes",
+    "super nintendo entertainment system":   "snes",
+    "super famicom":                         "snes",
+    "superfamicom":                          "snes",
+    # N64
+    "nintendo 64":   "n64",
+    "nintendo64":    "n64",
+    # GameCube / Wii / Wii U
+    "gcn":                "gamecube",
+    "gc":                 "gamecube",
+    "nintendo gamecube":  "gamecube",
+    "nintendo wii":       "wii",
+    "wii u":              "wiiu",
+    "nintendo wii u":     "wiiu",
+    # Game Boy family
+    "game boy":            "gb",
+    "gameboy":             "gb",
+    "game boy color":      "gbc",
+    "gameboy color":       "gbc",
+    "game boy advance":    "gba",
+    "gameboy advance":     "gba",
+    # DS / 3DS
+    "nintendo ds":   "ds",
+    "nds":           "ds",
+    "nintendo 3ds":  "3ds",
+    # Mega Drive / Genesis
+    "sega genesis":     "genesis",
+    "sega mega drive":  "megadrive",
+    "mega drive":       "megadrive",
+    # Sega misc
+    "sega 32x":           "32x",
+    "32 x":               "32x",
+    "sega cd":            "sega-cd",
+    "segacd":             "sega-cd",
+    "mega cd":            "sega-cd",
+    "megacd":             "sega-cd",
+    "game gear":          "game-gear",
+    "gamegear":           "game-gear",
+    "sega game gear":     "game-gear",
+    "master system":      "master-system",
+    "mastersystem":       "master-system",
+    "sega master system": "master-system",
+    "mark iii":           "master-system",
+    "sega saturn":        "saturn",
+    "dreamcast":          "dc",
+    "sega dreamcast":     "dc",
+    # PlayStation
+    "playstation":        "psx",
+    "ps1":                "psx",
+    "playstation 1":      "psx",
+    "sony playstation":   "psx",
+    "playstation 2":      "ps2",
+    "sony playstation 2": "ps2",
+    "playstation 3":      "ps3",
+    "playstation portable": "psp",
+    "sony psp":             "psp",
+    # PC Engine / TurboGrafx
+    "pc engine":      "pce",
+    "turbografx":     "pce",
+    "turbografx 16":  "pce",
+    "turbografx16":   "pce",
+    "pc engine cd":   "pce-cd",
+    "turbografx cd":  "pce-cd",
+    "turbo cd":       "pce-cd",
+    # Neo Geo
+    "neo geo":            "neogeo",
+    "snk neo geo":        "neogeo",
+    "neo geo cd":         "neogeocd",
+    "neo geo pocket":     "ngp",
+    "neo geo pocket color": "ngpc",
+    # WonderSwan
+    "wonder swan":        "wonderswan",
+    "wonder swan color":  "wonderswancolor",
+    # Atari
+    "atari 2600":  "atari2600",
+    "2600":        "atari2600",
+    "atari 5200":  "atari5200",
+    "5200":        "atari5200",
+    "atari 7800":  "atari7800",
+    "7800":        "atari7800",
+    "atari st":    "atari-st",
+    "atarist":     "atari-st",
+    "atari jaguar": "jaguar",
+    "atari lynx":   "lynx",
+    # ColecoVision / Vectrex
+    "colecovision":  "coleco",
+    "coleco vision": "coleco",
+    # MSX
+    "microsoft msx":   "msx",
+    "microsoft msx2":  "msx2",
+    "msx 2":           "msx2",
+    # ScummVM
+    "scumm vm": "scummvm",
+}
+
+# Compiled once at import time: non-alphanumeric runs → single space
+_FOLDER_NORM_RE = re.compile(r"[^a-z0-9]+")
+
+def _norm_folder(name: str) -> str:
+    """Lowercase and collapse non-alphanumeric runs to a single space."""
+    return _FOLDER_NORM_RE.sub(" ", name.lower()).strip()
+
+# Extension → SYSTEM_MAP key for unambiguous extensions (one system only).
+# Ambiguous extensions (.bin .iso .chd .cue .img .ecm .rom) are excluded here;
+# they are handled by header sniffing in Tier 3b.
+_EXT_TO_SYSTEM_KEY: dict[str, str] = {
+    ".nes": "nes",      ".fds": "fds",
+    ".sfc": "snes",     ".smc": "snes",
+    ".vb":  "virtualboy",
+    ".n64": "n64",      ".z64": "n64",      ".v64": "n64",
+    ".gb":  "gb",       ".gbc": "gbc",      ".gba": "gba",
+    ".nds": "ds",       ".3ds": "3ds",      ".cci": "3ds",
+    ".gcz": "gamecube", ".rvz": "gamecube",
+    ".wbfs": "wii",
+    ".md":  "megadrive", ".smd": "megadrive", ".gen": "genesis",
+    ".32x": "32x",
+    ".gg":  "game-gear", ".sms": "master-system",
+    ".cdi": "dc",       ".gdi": "dc",
+    ".pbp": "psp",      ".cso": "psp",
+    ".pce": "pce",
+    ".ngp": "ngp",      ".ngc": "ngpc",
+    ".ws":  "wonderswan", ".wsc": "wonderswancolor",
+    ".a26": "atari2600", ".a52": "atari5200", ".a78": "atari7800",
+    ".j64": "jaguar",   ".lnx": "lynx",
+    ".col": "coleco",   ".vec": "vectrex",
+}
+
+# Ambiguous extensions whose system cannot be determined from the name alone.
+_AMBIGUOUS_EXTS: frozenset[str] = frozenset({
+    ".iso", ".bin", ".cue", ".img", ".chd", ".ecm", ".rom",
+})
+
+# ROM magic signatures for header sniffing.
+# Each entry: (byte_offset, magic_bytes, system_key).
+# Order matters for overlapping prefixes (e.g. "SEGADISCSYSTEM" must come before "SEGA").
+_ROM_MAGIC: tuple[tuple[int, bytes, str], ...] = (
+    (0,   b"NES\x1a",             "nes"),       # iNES header
+    (0,   b"\x80\x37\x12\x40", "n64"),       # N64 .z64 big-endian
+    (0,   b"\x37\x80\x40\x12", "n64"),       # N64 .n64 little-endian
+    (0,   b"\x40\x12\x37\x80", "n64"),       # N64 .v64 byte-swapped
+    (16,  b"SEGADISCSYSTEM",       "sega-cd"),   # Sega CD — precedes generic SEGA
+    (256, b"SEGA 32X",             "32x"),       # 32X — precedes generic SEGA
+    (256, b"SEGA GENESIS",         "megadrive"),
+    (256, b"SEGA MEGA DRIVE",      "megadrive"),
+)
+_ROM_MAGIC_READ_SIZE: int = max(o + len(m) for o, m, _ in _ROM_MAGIC) + 1
+
+
+def _sniff_rom_header(path: Path) -> str | None:
+    """Return the SYSTEM_MAP key for path based on ROM magic bytes, or None."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(_ROM_MAGIC_READ_SIZE)
+    except OSError:
+        return None
+    for offset, magic, key in _ROM_MAGIC:
+        end = offset + len(magic)
+        if len(header) >= end and header[offset:end] == magic:
+            return key
+    return None
+
+
+def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
+    """Inspect files in rom_dir to infer the system. Returns (system_key, tier).
+
+    Tier 3a — extension profiling: count unambiguous extensions; the system with
+              ≥60% of all counted votes wins.
+    Tier 3b — header sniffing: read magic bytes from up to 5 ambiguous files;
+              only returns a result when all sniffed files unanimously agree.
+    """
+    from collections import Counter
+
+    ext_votes: Counter = Counter()
+    ambiguous_files: list[Path] = []
+
+    for p in rom_dir.iterdir():
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext in _AMBIGUOUS_EXTS:
+            ambiguous_files.append(p)
+        else:
+            key = _EXT_TO_SYSTEM_KEY.get(ext)
+            if key:
+                ext_votes[key] += 1
+
+    # Tier 3a: extension plurality
+    if ext_votes:
+        top_key, top_count = ext_votes.most_common(1)[0]
+        total = sum(ext_votes.values())
+        if top_count / total >= 0.6:
+            return top_key, "content-ext"
+
+    # Tier 3b: header sniffing (only when no unambiguous extensions found)
+    if not ext_votes and ambiguous_files:
+        header_votes: Counter = Counter()
+        for p in ambiguous_files[:5]:       # cap at 5 files to bound I/O cost
+            key = _sniff_rom_header(p)
+            if key:
+                header_votes[key] += 1
+        if header_votes:
+            top_key, top_count = header_votes.most_common(1)[0]
+            total = sum(header_votes.values())
+            if top_count == total:          # unanimous agreement only
+                return top_key, "content-header"
+
+    return "", ""
+
+
+def _tier_msg(folder: str, repo_name: str, match_tier: str, kind: str = "covers") -> None:
+    """Print a resolver info line for non-exact matches."""
+    fallback = "SGDB/LaunchBox only" if kind == "covers" else "LaunchBox fanart only"
+    if match_tier == "alias":
+        cprint(C.GRAY, f"  [{folder}] → libretro repo '{repo_name}' (alias)")
+    elif match_tier in ("content-ext", "content-header"):
+        label = "extension profiling" if match_tier == "content-ext" else "header sniffing"
+        cprint(C.GRAY, f"  [{folder}] → libretro repo '{repo_name}' (content: {label})")
+    elif not repo_name:
+        cprint(C.GRAY, f"  [{folder}] → unrecognised folder — {fallback}")
+
+
+def resolve_system_folder(folder: str, rom_dir: Path | None = None) -> tuple[str, str]:
+    """Map a ROM folder name to (repo_name, tier).
+
+    repo_name: libretro-thumbnails repo slug, or "" if unresolved.
+    tier:      "exact" | "alias" | "content-ext" | "content-header" | ""
+
+    rom_dir: path to the actual ROM folder for Tier 3 content inspection.
+             If None or non-existent, Tier 3 is skipped.
+    """
+    # Tier 1: exact SYSTEM_MAP key (e.g. "snes", "n64", "dc")
+    key = folder.lower()
+    if key in SYSTEM_MAP:
+        return SYSTEM_MAP[key], "exact"
+
+    # Tier 2: normalise separators then check alias table.
+    # _norm_folder collapses spaces, underscores, hyphens to a single space so
+    # "Nintendo_64", "Nintendo-64", "Nintendo 64" all resolve identically.
+    alias_key = FOLDER_ALIASES.get(_norm_folder(folder))
+    if alias_key:
+        return SYSTEM_MAP[alias_key], "alias"
+
+    # Tier 3: content-based identification (only if rom_dir provided and exists)
+    if rom_dir and rom_dir.is_dir():
+        content_key, content_tier = _profile_folder_contents(rom_dir)
+        if content_key and content_key in SYSTEM_MAP:
+            return SYSTEM_MAP[content_key], content_tier
+
+    return "", ""
+
 
 BASE_RAW_URL = "https://raw.githubusercontent.com/libretro-thumbnails"
 BASE_API_URL = "https://api.github.com/repos/libretro-thumbnails"
@@ -527,49 +836,65 @@ def _lbdb_region_rank(preferred: str) -> dict[str, int]:
     return {r: i for i, r in enumerate(order)}
 
 
+# Image types indexed from LaunchBox — defined at module level so the tuple
+# is not reconstructed on every XML element during the streaming parse.
+_LBDB_INDEXED_TYPES: frozenset[str] = frozenset((
+    _LBDB_TYPE_COVER, _LBDB_TYPE_BG, _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
+))
+
+
 def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
     """Parse Metadata.zip bytes into the in-memory index.
 
     Returns: { normalized_name: { img_type: [(region_key, filename), ...] } }
+
+    Uses ET.iterparse + zf.open() to stream-decompress each XML file instead
+    of loading the full decompressed bytes into memory first (ET.fromstring).
+    The LaunchBox XML decompresses to ~500 MB; streaming keeps peak RAM usage
+    roughly half that, which matters on low-memory devices (e.g. RPi 4 1 GB).
+
+    Single-pass assumption: <Game> elements always precede <GameImage> elements
+    in the LaunchBox XML schema, which has been stable since v2.  If that ever
+    changes, db_id_to_norm lookups for early GameImages will simply miss and
+    those images will be silently skipped — safe degradation, not a crash.
     """
     index: dict = {}
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         xml_names = [n for n in zf.namelist() if n.endswith(".xml")]
         for xml_name in xml_names:
-            try:
-                root = ET.fromstring(zf.read(xml_name))
-            except Exception:
-                continue
-
-            # DatabaseID → normalized name
             db_id_to_norm: dict[str, str] = {}
-            for game in root.iter("Game"):
-                db_id = (game.findtext("DatabaseID") or "").strip()
-                name  = (game.findtext("Name") or "").strip()
-                if db_id and name:
-                    norm = normalize(strip_tags(name)).lower().strip()
-                    if norm:
-                        db_id_to_norm[db_id] = norm
+            try:
+                # zf.open() decompresses on-the-fly; iterparse processes one
+                # element at a time. elem.clear() releases each node immediately
+                # after use so the DOM never grows beyond a single element.
+                for _event, elem in ET.iterparse(zf.open(xml_name), events=("end",)):
+                    tag = elem.tag
+                    if tag == "Game":
+                        db_id = (elem.findtext("DatabaseID") or "").strip()
+                        name  = (elem.findtext("Name") or "").strip()
+                        if db_id and name:
+                            norm = normalize(strip_tags(name)).lower().strip()
+                            if norm:
+                                db_id_to_norm[db_id] = norm
+                        elem.clear()
 
-            # Index the four image types we care about
-            _INDEXED_TYPES = (
-                _LBDB_TYPE_COVER, _LBDB_TYPE_BG,
-                _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
-            )
-            for img in root.iter("GameImage"):
-                db_id    = (img.findtext("DatabaseID") or "").strip()
-                filename = (img.findtext("FileName") or "").strip()
-                img_type = (img.findtext("Type") or "").strip()
-                region   = (img.findtext("Region") or "").strip().lower()
-                if not (db_id and filename and img_type in _INDEXED_TYPES):
-                    continue
-                norm = db_id_to_norm.get(db_id)
-                if not norm:
-                    continue
-                region_key = _LBDB_REGION_MAP.get(region, "")
-                index.setdefault(norm, {}).setdefault(img_type, []).append(
-                    (region_key, filename)
-                )
+                    elif tag == "GameImage":
+                        db_id    = (elem.findtext("DatabaseID") or "").strip()
+                        filename = (elem.findtext("FileName") or "").strip()
+                        img_type = (elem.findtext("Type") or "").strip()
+                        region   = (elem.findtext("Region") or "").strip().lower()
+                        if db_id and filename and img_type in _LBDB_INDEXED_TYPES:
+                            norm = db_id_to_norm.get(db_id)
+                            if norm:
+                                region_key = _LBDB_REGION_MAP.get(region, "")
+                                index.setdefault(norm, {}).setdefault(img_type, []).append(
+                                    (region_key, filename)
+                                )
+                        elem.clear()
+
+            except Exception:
+                # Malformed XML in one file — skip it, keep whatever was indexed
+                continue
     return index
 
 
@@ -1743,8 +2068,19 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
 
     if not repo_files:
         if _sgdb_fn is None:
-            cprint(C.DYELLOW,
-                   f"  No repo file list available -- skipping downloads for {folder}")
+            # with_logo: no libretro repo — fall through to LaunchBox Box-Front.
+            # _worker_direct calls lbdb_find_cover_url for every ROM.
+            cprint(C.GRAY,
+                   f"  No libretro repo for {folder} — falling back to LaunchBox Box-Front...")
+            if not cfg.dry_run:
+                _download_libretro_covers(
+                    [], covers_path, repo_name, cfg, counters, failed_covers, folder,
+                    lb_folder=_lb_folder, sgdb_fn=None, lb_fallback_finder=_lb_fallback,
+                    lb_index=lb_idx, direct_roms=roms_to_dl,
+                )
+            else:
+                for r in roms_to_dl:
+                    cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (LB Box-Front)  '{r}'")
             return
         # game_logo: no Named_Logos for this system; SGDB + LB may still have logos.
         cprint(C.GRAY, f"  No Named_Logos for {folder} — trying SGDB + LaunchBox logos...")
@@ -1865,9 +2201,11 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
 
     if cfg.bg_style == "boxart":
         if not repo_files:
-            cprint(C.DYELLOW,
-                   f"  No repo file list available for boxart BG — skipping downloads for {folder}")
-            return
+            # No libretro repo resolved — fall back to LaunchBox Box-Front directly.
+            # _download_bg_boxart with repo_files=[] routes all ROMs through
+            # _worker_direct → lbdb_find_cover_url (letterboxed to 1920x1080).
+            cprint(C.GRAY,
+                   f"  No libretro repo for {folder} — falling back to LaunchBox Box-Front...")
         _download_bg_boxart(
             roms_to_dl, bgs_path, repo_name, repo_files or [],
             folder, cfg, bg_counters, failed_bgs, lb_index=lb_index,
@@ -1881,10 +2219,52 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
 # CRC32 DUPLICATE DETECTION
 # =============================================================================
 ROM_EXTENSIONS = {
-    ".sfc", ".smc", ".nes", ".gb", ".gbc", ".gba", ".n64", ".z64", ".v64",
-    ".nds", ".md", ".smd", ".gen", ".gg", ".sms", ".pce", ".iso", ".bin",
-    ".cue", ".img", ".chd", ".pbp", ".cso", ".rom", ".a26", ".lnx", ".ws",
-    ".wsc", ".ngp", ".ngc",
+    # Nintendo cartridge / handheld
+    ".nes",                          # NES
+    ".fds",                          # Famicom Disk System
+    ".sfc", ".smc",                  # SNES (headered/headerless — see _smc_header_offset)
+    ".vb",                           # Virtual Boy
+    ".gb", ".gbc", ".gba",           # Game Boy / Color / Advance
+    ".nds",                          # Nintendo DS
+    ".3ds", ".cci",                  # Nintendo 3DS (dump / raw cartridge image)
+    # Nintendo disc / flash
+    ".gcz",                          # GameCube / Wii — Dolphin GCZ compression
+    ".rvz",                          # GameCube / Wii — Dolphin RVZ compression
+    ".wbfs",                         # Wii Backup File System
+    ".xci",                          # Nintendo Switch cartridge image
+    # Nintendo 64
+    ".n64", ".z64", ".v64",          # N64 (little-endian / big-endian / byte-swapped)
+    # Sega cartridge / handheld
+    ".md", ".smd", ".gen",           # Mega Drive / Genesis
+    ".32x",                          # Sega 32X
+    ".gg", ".sms",                   # Game Gear / Master System
+    # Sega disc
+    ".cdi",                          # Dreamcast — DiscJuggler image
+    ".gdi",                          # Dreamcast — GD-ROM track descriptor
+    # Sony handheld
+    ".pbp", ".cso",                  # PSP (EBOOT / compressed ISO)
+    # NEC
+    ".pce",                          # PC Engine / TurboGrafx-16
+    # SNK handheld
+    ".ngp", ".ngc",                  # Neo Geo Pocket / Color
+    # Atari cartridge
+    ".a26",                          # Atari 2600
+    ".a52",                          # Atari 5200
+    ".a78",                          # Atari 7800
+    ".j64",                          # Atari Jaguar
+    ".lnx",                          # Atari Lynx
+    # Other cartridge systems
+    ".ws", ".wsc",                   # WonderSwan / Color
+    ".col",                          # ColecoVision
+    ".vec",                          # Vectrex
+    # Generic / multi-system disc formats
+    ".iso",                          # ISO 9660 disc image
+    ".bin", ".cue",                  # raw/cue-sheet pair (PSX, Saturn, Redbook...)
+    ".img",                          # raw sector image
+    ".ecm",                          # ECM-compressed disc image
+    ".chd",                          # Compressed Hunks of Data (MAME, RetroArch)
+    # Catch-all
+    ".rom",                          # generic cartridge dump
 }
 
 # SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
@@ -2570,7 +2950,8 @@ def _run_sync(
             repo_name: str = ""
             repo_files: list[str] = []
             if cfg.cover_style != "without_logo" and cfg.download_mode != "skip":
-                repo_name  = SYSTEM_MAP.get(folder.lower(), "")
+                repo_name, match_tier = resolve_system_folder(folder, roms_path)
+                _tier_msg(folder, repo_name, match_tier, kind="covers")
                 if repo_name:
                     libretro_folder = ("Named_Logos"
                                        if cfg.cover_style == "game_logo"
@@ -2619,7 +3000,8 @@ def _run_sync(
             bg_repo_name:  str       = ""
             bg_repo_files: list[str] = []
             if cfg.bg_style == "boxart" and cfg.download_mode != "skip":
-                bg_repo_name = SYSTEM_MAP.get(folder.lower(), "")
+                bg_repo_name, bg_match_tier = resolve_system_folder(folder, roms_path)
+                _tier_msg(folder, bg_repo_name, bg_match_tier, kind="backgrounds")
                 if bg_repo_name:
                     bg_repo_files = get_repo_file_list(
                         bg_repo_name, cfg.github_token, cache_ttl,
@@ -2853,8 +3235,15 @@ def _wizard(
         "2": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
         "3": f"{C.CYAN}Download covers only{C.RESET}",
         "4": f"{C.CYAN}Download backgrounds only{C.RESET}",
+        "h": f"{C.GRAY}Help — show usage, cover styles, options{C.RESET}",
     })
     print()
+
+    if task_ch == "h":
+        # Print the module docstring (lines 2-45 of the script source).
+        # __doc__ is the canonical source — no file I/O needed.
+        print(__doc__)
+        sys.exit(0)
 
     need_covers = task_ch in ("2", "3")
     need_bgs    = task_ch in ("2", "4")
