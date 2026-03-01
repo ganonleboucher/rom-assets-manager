@@ -1,11 +1,3 @@
-#TODO
-# Detect duplicate deletion was broken and fixed (dry_run=dry_run) but comments need cleaning
-# Ensure that the orphans list being passed into process_folder is being appended to, not overwritten, 
-#and that the final cleanup loop in _run_sync (at the very bottom of the script) is actually being reached. Currently, 
-#if a folder is skipped or an error occurs, the script might exit before the "Orphan Cleanup" phase.
-# Refacto + simplify/optimize comment: objective >= 3000l
-# Unit Testing + code smell and quality + performance
-
 #!/usr/bin/env python3
 """
 sync-covers.py — Download and sync cover art & backgrounds to a ROM library.
@@ -73,7 +65,7 @@ import io
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -449,7 +441,6 @@ def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
     Tier 3b — header sniffing: read magic bytes from up to 5 ambiguous files;
               only returns a result when all sniffed files unanimously agree.
     """
-    from collections import Counter
 
     ext_votes: Counter = Counter()
     ambiguous_files: list[Path] = []
@@ -1312,6 +1303,54 @@ def progress_bar(done: int, total: int, width: int = 40, label: str = "") -> str
 # COVER / BACKGROUND PIPELINE HELPERS
 # =============================================================================
 
+class _ProgressTracker:
+    """Thread-safe (done, total) counter shared across download workers.
+    Avoids the repeated nonlocal + twin-lock pattern in every download function.
+    Usage::
+        tracker = _ProgressTracker(total=len(roms), label="Downloading ")
+        # inside worker (any thread):
+        n, t = tracker.tick()
+        with print_lock:
+            print(progress_bar(n, t, label=tracker.label), end="", flush=True)
+    """
+    __slots__ = ("_lock", "total", "label", "_done")
+
+    def __init__(self, total: int, label: str = "") -> None:
+        self._lock = threading.Lock()
+        self._done = 0
+        self.total = total
+        self.label = label
+
+    def tick(self, n: int = 1) -> tuple[int, int]:
+        """Increment done by n; return (done, total) snapshot under lock."""
+        with self._lock:
+            self._done += n
+            return self._done, self.total
+
+def _run_thread_pool(
+    parallel_jobs: int,
+    items: "list",
+    worker: "Callable",
+    *,
+    max_workers: int | None = None,
+    interrupt_msg: str = "  Interrupted — cancelling...",
+) -> None:
+    """Submit ``worker(item)`` for each item via a ThreadPoolExecutor.
+    Caps workers at min(parallel_jobs, max_workers) when max_workers is set.
+    Cancels remaining futures and re-raises on KeyboardInterrupt.
+    Individual worker exceptions propagate through fut.result() unchanged.
+    """
+    n_workers = min(parallel_jobs, max_workers) if max_workers else parallel_jobs
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(worker, item) for item in items]
+        try:
+            for fut in as_completed(futures):
+                fut.result()
+        except KeyboardInterrupt:
+            cprint(C.YELLOW, f"\n{interrupt_msg}")
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+
 def _fuzzy_rename_pass(
     existing: dict[str, Path],
     roms: dict[str, Path],
@@ -1480,7 +1519,7 @@ def _download_clean_covers(
     cfg: SyncConfig,
     counters: Counters,
     failed_covers: list[tuple[str, str, str]],
-    lb_index: LbIndex = None,
+    lb_index: LbIndex | None = None,
 ) -> None:
     """Download clean cover art for without_logo style.
     With SGDB key  : SteamGridDB grid → LaunchBox Screenshot-Game-Title fallback.
@@ -1498,48 +1537,32 @@ def _download_clean_covers(
 
     cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} cover(s) via {source_desc}...")
     print_lock = threading.Lock()
-    dl_done    = 0
-    dl_total   = len(roms_to_dl)
-    dl_lock    = threading.Lock()
+    tracker    = _ProgressTracker(len(roms_to_dl), label="Downloading ")
 
     def _worker(rom_stem: str) -> None:
-        nonlocal dl_done
         jpg_path = covers_path / f"{rom_stem}.jpg"
-
         url = _find_cover_fallback(rom_stem, _lb, cfg)
         if url is None:
+            tracker.tick()
             with print_lock:
                 cprint(C.DYELLOW, f"  NO COVER  '{rom_stem}'")
                 failed_covers.append((folder, rom_stem, "no match: no clean cover found"))
-            with dl_lock:
-                dl_done += 1
             return
-
         try:
             raw = _http_get(url, None, timeout=cfg.http_timeout)
             _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
-            with dl_lock:
-                dl_done += 1
-                dd, dt = dl_done, dl_total
+            dd, dt = tracker.tick()
             with print_lock:
-                print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                 cprint(C.GREEN, f"  OK  {rom_stem}")
         except Exception as e:
-            with dl_lock:
-                dl_done += 1
+            tracker.tick()
             with print_lock:
                 cprint(C.DRED, f"  FAIL  '{rom_stem}': {e}")
                 failed_covers.append((folder, rom_stem, f"download failed: {e}"))
 
-    with ThreadPoolExecutor(max_workers=min(cfg.parallel_jobs, 4)) as pool:
-        futures = [pool.submit(_worker, r) for r in roms_to_dl]
-        try:
-            for fut in as_completed(futures):
-                fut.result()
-        except KeyboardInterrupt:
-            cprint(C.YELLOW, "\n  Interrupted -- cancelling remaining downloads...")
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+    _run_thread_pool(cfg.parallel_jobs, roms_to_dl, _worker, max_workers=4,
+                     interrupt_msg="  Interrupted -- cancelling remaining downloads...")
     print()
 
 def _find_fallback_url(
@@ -1596,7 +1619,7 @@ def _download_libretro_covers(
     lb_folder:        str,
     lb_fallback_finder: "Callable[[str, LbIndex, str], str | None]",
     sgdb_fn:          "Callable[[int, str], str | None] | None" = None,
-    lb_index:         LbIndex = None,
+    lb_index:         LbIndex | None = None,
     direct_roms:      list[str] | None = None,
 ) -> None:
     """Download covers using libretro-thumbnails with LB + optional SGDB fallbacks.
@@ -1611,12 +1634,9 @@ def _download_libretro_covers(
     lb_idx  = lb_index or {}
     cprint(C.CYAN, f"  Downloading {len(matches) + len(_direct)} cover(s)...")
     print_lock = threading.Lock()
-    dl_done    = 0
-    dl_total   = len(matches) + len(_direct)
-    dl_lock    = threading.Lock()
+    tracker    = _ProgressTracker(len(matches) + len(_direct), label="Downloading ")
 
     def _worker(item: LibretroMatch) -> None:
-        nonlocal dl_done
         rom_stem   = item.rom_stem
         jpg_path   = item.jpg_path
         candidates = item.candidates
@@ -1631,11 +1651,9 @@ def _download_libretro_covers(
                         raw = _http_get(sgdb_url, None, timeout=cfg.http_timeout)
                         _write_and_convert(raw, covers_path, rom_stem, jpg_path,
                                            cfg.magick, counters)
-                        with dl_lock:
-                            dl_done += 1; dd, dt = dl_done, dl_total
+                        dd, dt = tracker.tick()
                         with print_lock:
-                            print(progress_bar(dd, dt, label="Downloading "),
-                                  end="", flush=True)
+                            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                             cprint(C.GREEN, f"  OK (SGDB)  {rom_stem}")
                         return
                     except Exception as e:
@@ -1669,12 +1687,10 @@ def _download_libretro_covers(
                            f"(ImageMagick error, trying next candidate...)")
                 continue
 
-            with dl_lock:
-                dl_done += 1
-                dd, dt = dl_done, dl_total
+            dd, dt = tracker.tick()
             with print_lock:
                 attempt_note = f" (attempt {attempt+1})" if attempt > 0 else ""
-                print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                 cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
             return  # success — stop trying candidates
 
@@ -1684,21 +1700,19 @@ def _download_libretro_covers(
             try:
                 raw = _http_get(_fallback_url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
-                with dl_lock:
-                    dl_done += 1; dd, dt = dl_done, dl_total
+                dd, dt = tracker.tick()
                 with print_lock:
-                    print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                     cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as lbe:
                 with print_lock:
                     cprint(C.GRAY, f"  Fallback download failed  '{rom_stem}': {lbe}")
 
-        # All sources exhausted — still count this slot so the bar reaches 100%
-        with dl_lock:
-            dl_done += 1; dd, dt = dl_done, dl_total
+        # All sources exhausted — advance the bar so it reaches 100%
+        dd, dt = tracker.tick()
         with print_lock:
-            print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
             cprint(C.DRED,
                    f"  GIVE UP  '{rom_stem}' -- all {len(candidates)} candidate(s) failed")
             failed_covers.append((folder, rom_stem,
@@ -1706,7 +1720,6 @@ def _download_libretro_covers(
 
     def _worker_direct(rom_stem: str) -> None:
         """ROMs that skip libretro: try sgdb_fn first, then lb_fallback_finder."""
-        nonlocal dl_done
         jpg_path = covers_path / f"{rom_stem}.jpg"
         url = _find_fallback_url(
             rom_stem, lb_idx, cfg,
@@ -1719,19 +1732,17 @@ def _download_libretro_covers(
                 raw = _http_get(url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path,
                                    cfg.magick, counters)
-                with dl_lock:
-                    dl_done += 1; dd, dt = dl_done, dl_total
+                dd, dt = tracker.tick()
                 with print_lock:
-                    print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                     cprint(C.GREEN, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as e:
                 with print_lock:
                     cprint(C.GRAY, f"  Fallback failed  '{rom_stem}': {e}")
-        with dl_lock:
-            dl_done += 1; dd, dt = dl_done, dl_total
+        dd, dt = tracker.tick()
         with print_lock:
-            print(progress_bar(dd, dt, label="Downloading "), end="", flush=True)
+            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
             cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
             failed_covers.append((folder, rom_stem, "no match: no image found"))
 
@@ -1756,7 +1767,7 @@ def _download_bg_boxart(
     cfg: SyncConfig,
     bg_counters: Counters,
     failed_bgs: list[tuple[str, str, str]],
-    lb_index: LbIndex = None,
+    lb_index: LbIndex | None = None,
 ) -> None:
     """Download backgrounds using box art (libretro Named_Boxarts → LaunchBox Box-Front).
     Images are letterboxed to 1920x1080 by _write_and_convert.
@@ -1770,9 +1781,6 @@ def _download_bg_boxart(
 
     lb_idx     = lb_index or {}
     print_lock = threading.Lock()
-    bg_done    = 0
-    bg_total   = len(roms_to_dl)
-    bg_lock    = threading.Lock()
 
     # Match ROMs against libretro repo (Named_Boxarts), same algorithm as covers.
     matches, no_matches, n_skipped = _match_libretro_roms(
@@ -1782,11 +1790,11 @@ def _download_bg_boxart(
 
     # ROMs with no libretro match go straight to the LaunchBox fallback.
     direct_lb: list[str] = [nm.rom_stem for nm in no_matches]
+    tracker = _ProgressTracker(len(matches) + len(direct_lb), label="BG boxart ")
 
     def _worker_match(item: LibretroMatch) -> None:
-        nonlocal bg_done
-        rom_stem   = item.rom_stem
-        jpg_path   = bgs_path / f"{rom_stem}.jpg"
+        rom_stem = item.rom_stem
+        jpg_path = bgs_path / f"{rom_stem}.jpg"
         for attempt, (match_name, _) in enumerate(item.candidates):
             url = (f"{BASE_RAW_URL}/{repo_name}/master/Named_Boxarts/"
                    f"{urllib.parse.quote(match_name)}.png")
@@ -1804,11 +1812,10 @@ def _download_bg_boxart(
                                    gravity="East")
             except Exception:
                 continue
-            with bg_lock:
-                bg_done += 1; dd, dt = bg_done, bg_total
+            dd, dt = tracker.tick()
             with print_lock:
                 attempt_note = f" (attempt {attempt+1})" if attempt > 0 else ""
-                print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                 cprint(C.GREEN, f"  OK  {rom_stem}{attempt_note}")
             return  # success
         # Libretro exhausted — try LaunchBox Box-Front
@@ -1819,25 +1826,22 @@ def _download_bg_boxart(
                 _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
                                    cfg.magick, bg_counters, dims="1920x1080",
                                    gravity="East")
-                with bg_lock:
-                    bg_done += 1; dd, dt = bg_done, bg_total
+                dd, dt = tracker.tick()
                 with print_lock:
-                    print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                     cprint(C.GREEN, f"  OK (LaunchBox fallback)  {rom_stem}")
                 return
             except Exception as e:
                 with print_lock:
                     cprint(C.GRAY, f"  LaunchBox fallback failed  '{rom_stem}': {e}")
-        with bg_lock:
-            bg_done += 1; dd, dt = bg_done, bg_total
+        dd, dt = tracker.tick()
         with print_lock:
-            print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
             cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
             failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
 
     def _worker_direct(rom_stem: str) -> None:
         """LaunchBox-only worker for ROMs with no libretro match."""
-        nonlocal bg_done
         jpg_path = bgs_path / f"{rom_stem}.jpg"
         lb_url   = lbdb_find_cover_url(rom_stem, lb_idx, cfg.preferred_region)
         if lb_url:
@@ -1846,19 +1850,17 @@ def _download_bg_boxart(
                 _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
                                    cfg.magick, bg_counters, dims="1920x1080",
                                    gravity="East")
-                with bg_lock:
-                    bg_done += 1; dd, dt = bg_done, bg_total
+                dd, dt = tracker.tick()
                 with print_lock:
-                    print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+                    print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                     cprint(C.GREEN, f"  OK (LaunchBox)  {rom_stem}")
                 return
             except Exception as e:
                 with print_lock:
                     cprint(C.GRAY, f"  LaunchBox failed  '{rom_stem}': {e}")
-        with bg_lock:
-            bg_done += 1; dd, dt = bg_done, bg_total
+        dd, dt = tracker.tick()
         with print_lock:
-            print(progress_bar(dd, dt, label="BG boxart "), end="", flush=True)
+            print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
             cprint(C.DRED, f"  NO IMAGE  '{rom_stem}'")
             failed_bgs.append((folder, rom_stem, "no match: no boxart found"))
 
@@ -1881,7 +1883,7 @@ def _download_bg_images(
     cfg: SyncConfig,
     bg_counters: Counters,
     failed_bgs: list[tuple[str, str, str]],
-    lb_index: LbIndex = None,
+    lb_index: LbIndex | None = None,
 ) -> None:
     """Download background images from SGDB Heroes with LaunchBox Fanart fallback."""
     source_desc = ("SteamGridDB Heroes → LaunchBox Fanart fallback"
@@ -1895,18 +1897,17 @@ def _download_bg_images(
         return
 
     print_lock = threading.Lock()
-    bg_done    = 0
-    bg_total   = len(roms_to_dl)
-    bg_lock    = threading.Lock()
+    tracker    = _ProgressTracker(len(roms_to_dl), label="Backgrounds")
+    lb_idx     = lb_index or {}
 
     def _worker(rom_stem: str) -> None:
-        nonlocal bg_done
-        jpg_path  = bgs_path / f"{rom_stem}.jpg"
-        hero_url: str | None = None
-        lb_bg_url: str | None = None
-
-        # Track where this image came from for accurate error reporting
+        jpg_path    = bgs_path / f"{rom_stem}.jpg"
+        hero_url:   str | None = None
         used_source = "none"
+        # game_id is only meaningful when sgdb_key is set; initialise to None
+        # so the error-reason branch below never risks a NameError.
+        game_id: int | None = None
+
         if cfg.sgdb_key:
             game_id = sgdb_search_game(rom_stem, cfg.sgdb_key)
             if game_id is None:
@@ -1923,9 +1924,8 @@ def _download_bg_images(
                     used_source = "SGDB hero"
 
         if hero_url is None:
-            lb_bg_url = lbdb_find_bg_url(rom_stem, lb_index or {}, cfg.preferred_region)
+            lb_bg_url = lbdb_find_bg_url(rom_stem, lb_idx, cfg.preferred_region)
             if lb_bg_url is None:
-                # Compose reason string based on what was actually tried
                 if not cfg.sgdb_key:
                     source_note = "no fanart (no SGDB key, LaunchBox: no fanart)"
                 elif game_id is None:
@@ -1934,8 +1934,9 @@ def _download_bg_images(
                     source_note = "no match: SGDB no hero, LaunchBox: no fanart"
                 with print_lock:
                     failed_bgs.append((folder, rom_stem, source_note))
+                tracker.tick()  # still advance so bar stays accurate
                 return
-            hero_url  = lb_bg_url
+            hero_url    = lb_bg_url
             used_source = "LaunchBox"
             with print_lock:
                 source = "LaunchBox" if not cfg.sgdb_key else "LaunchBox (SGDB fallback)"
@@ -1945,27 +1946,18 @@ def _download_bg_images(
             raw = _http_get(hero_url, None, timeout=cfg.http_timeout)
             _write_and_convert(raw, bgs_path, rom_stem, jpg_path, cfg.magick, bg_counters,
                                dims="1920x1080")
-            with bg_lock:
-                bg_done += 1
-                dd, dt = bg_done, bg_total
+            dd, dt = tracker.tick()
             with print_lock:
-                print(progress_bar(dd, dt, label="Backgrounds"), end="", flush=True)
+                print(progress_bar(dd, dt, label=tracker.label), end="", flush=True)
                 cprint(C.GREEN, f"  OK  {rom_stem}")
         except Exception as e:
+            tracker.tick()
             with print_lock:
                 cprint(C.DRED, f"  FAIL  '{rom_stem}': {e}")
                 failed_bgs.append((folder, rom_stem, f"{used_source} download failed: {e}"))
 
-    with ThreadPoolExecutor(max_workers=min(cfg.parallel_jobs, 4)) as pool:
-        futures = [pool.submit(_worker, r) for r in roms_to_dl]
-        try:
-            for fut in as_completed(futures):
-                fut.result()
-        except KeyboardInterrupt:
-            cprint(C.YELLOW,
-                   "\n  Interrupted -- cancelling remaining background downloads...")
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+    _run_thread_pool(cfg.parallel_jobs, roms_to_dl, _worker, max_workers=4,
+                     interrupt_msg="  Interrupted -- cancelling remaining background downloads...")
     print()  # newline after progress bar
 
 # =============================================================================
@@ -1978,7 +1970,7 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
                    counters: Counters,
                    orphans: list[str],
                    failed_covers: list[tuple[str, str, str]],
-                   lb_index: LbIndex = None) -> None:
+                   lb_index: LbIndex | None = None) -> None:
     """Process one system folder: rename mismatched covers, then download missing ones.
     Dispatches to the SGDB (without_logo) or libretro-thumbnails+LaunchBox (with_logo)
     download pipeline based on cfg.cover_style.
@@ -2119,7 +2111,7 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                       bg_counters: Counters,
                       bg_orphans: list[str],
                       failed_bgs: list[tuple[str, str, str]],
-                      lb_index: LbIndex = None,
+                      lb_index: LbIndex | None = None,
                       repo_files: list[str] | None = None,
                       repo_name: str = "") -> None:
     """Process one system folder for background art.
@@ -2483,10 +2475,6 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                        dry_run: bool = True) -> None:
     """Print the final duplicate report, then prompt the user to delete if duplicates exist.
     confirmed: list of groups, each group is [(path, crc32_hex, sha1_hex, size_bytes), ...]
-    dry_run:   when True the deletion prompt is shown but no files are removed;
-               the user still sees exactly what would happen.
-    After the report, the user is asked which files to keep and whether to proceed.
-    Running from a non-interactive context (pipe/redirect) skips the prompt safely.
     """
 
     if empty_files:
@@ -2727,36 +2715,65 @@ def _resize_pass(
     if not needs_resize:
         return
 
-    print_lock   = threading.Lock()
-    resize_done  = 0
-    resize_total = len(needs_resize)
-    resize_lock  = threading.Lock()
+    print_lock = threading.Lock()
+    tracker    = _ProgressTracker(len(needs_resize), label="Resizing  ")
 
     def resize_one(jpg: Path):
-        nonlocal resize_done
         try:
             magick_resize(cfg.magick, str(jpg), str(jpg), dims=target_dims, gravity=gravity)
             counters.inc("converted")
-            with resize_lock:
-                resize_done += 1
-                rd = resize_done
-            with print_lock:  # progress bar + filename printed atomically
-                print(progress_bar(rd, resize_total, label="Resizing  "), end="", flush=True)
+            rd, rt = tracker.tick()
+            with print_lock:
+                print(progress_bar(rd, rt, label=tracker.label), end="", flush=True)
                 cprint(C.DCYAN, f"  RESIZED  {jpg}")
         except Exception as e:
+            tracker.tick()
             with print_lock:
                 cprint(C.DRED, f"  RESIZE FAIL  {jpg}: {e}")
 
-    with ThreadPoolExecutor(max_workers=cfg.parallel_jobs) as pool:
-        futures = [pool.submit(resize_one, jpg) for jpg in needs_resize]
-        try:
-            for fut in as_completed(futures):
-                fut.result()
-        except KeyboardInterrupt:
-            cprint(C.YELLOW, "\n  Interrupted — cancelling remaining resize operations...")
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+    _run_thread_pool(cfg.parallel_jobs, needs_resize, resize_one,
+                     interrupt_msg="  Interrupted — cancelling remaining resize operations...")
     print()  # newline after progress bar
+
+def _print_counters_block(
+    counters: Counters,
+    failed: list[tuple[str, str, str]],
+    label: str,            # "cover" | "background"
+    dup_label: str,        # "covers" | "BGs"
+    delete_orphans: bool,
+    dry_run: bool,
+    *,
+    fail_tip: str = "",
+    extra_fail_keys: "dict[str, str] | None" = None,
+) -> None:
+    """Shared stats block for covers and backgrounds.
+    extra_fail_keys: optional {substring: display_label} for additional failure
+                     categories (e.g. "no hero" for background-specific reporting).
+    """
+    cprint(C.YELLOW, f"  Renamed (or would) : {counters.renamed}")
+    if counters.duplicates:
+        hint = "run --delete-orphans to remove" if not delete_orphans else "deleted"
+        cprint(C.DRED, f"  Duplicate {dup_label:<7}: {counters.duplicates} ({hint})")
+    cprint(C.CYAN,  f"  Downloaded         : {counters.downloaded}")
+    cprint(C.GRAY,  f"  Skipped (exist)    : {counters.skipped}")
+    if failed:
+        n_no_match = sum(1 for _, _, r in failed if "no match" in r)
+        n_dl_fail  = sum(1 for _, _, r in failed if "download failed" in r)
+        if n_dl_fail:
+            cprint(C.DRED, f"  Download failures  : {n_dl_fail}")
+        if n_no_match:
+            cprint(C.DRED, f"  No repo match      : {n_no_match}")
+        for substr, disp in (extra_fail_keys or {}).items():
+            n = sum(1 for _, _, r in failed if substr in r)
+            if n:
+                cprint(C.DRED, f"  {disp:<19}: {n}")
+        cprint(C.DRED, f"  Missing {label}s     : {len(failed)} total")
+    cprint(C.DCYAN, f"  Converted+Resized  : {counters.converted}")
+    if delete_orphans:
+        cprint(C.DRED, f"  Deleted (or would) : {counters.deleted}")
+    else:
+        cprint(C.RED,  f"  Unmatched kept     : {counters.missing}")
+
 
 def _print_summary(
     counters: Counters,
@@ -2768,9 +2785,8 @@ def _print_summary(
 ) -> None:
     """Print run summary box, failed-covers report, and optional backgrounds summary."""
     dry_run        = cfg.dry_run
-    download_mode  = cfg.download_mode
-    cover_style    = cfg.cover_style
     delete_orphans = cfg.delete_orphans
+
     print()
     cprint(C.CYAN, "=============================================")
     if dry_run:
@@ -2778,35 +2794,18 @@ def _print_summary(
         cprint(C.MAGENTA, "  Run with --no-dry-run to apply changes")
     else:
         cprint(C.GREEN, "  LIVE RUN complete")
-    cprint(C.CYAN,    f"  Download mode      : {download_mode}")
+    cprint(C.CYAN, f"  Download mode      : {cfg.download_mode}")
     _STYLE_LABELS = {
         "with_logo":    "With logo (libretro/LaunchBox)",
         "without_logo": "Without logo (SGDB)",
         "game_logo":    "Game logo (libretro/LaunchBox/SGDB)",
     }
-    cprint(C.CYAN,    f"  Cover style        : {_STYLE_LABELS.get(cover_style, cover_style)}")
-    cprint(C.CYAN,    f"  Folders processed  : {len(common)}")
-    cprint(C.YELLOW,  f"  Renamed (or would) : {counters.renamed}")
-    if counters.duplicates:
-        cprint(C.DRED,    f"  Duplicate covers   : {counters.duplicates} (run --delete-orphans to remove)" if not delete_orphans
-                          else f"  Duplicate covers   : {counters.duplicates} (deleted)")
-    cprint(C.CYAN,    f"  Downloaded         : {counters.downloaded}")
-    cprint(C.GRAY,    f"  Skipped (exist)    : {counters.skipped}")
-    if failed_covers:
-        n_no_match = sum(1 for _, _, r in failed_covers if r.startswith("no match"))
-        n_dl_fail  = sum(1 for _, _, r in failed_covers if r.startswith("download failed"))
-        if n_dl_fail:
-            cprint(C.DRED, f"  Download failures  : {n_dl_fail}")
-        if n_no_match:
-            cprint(C.DRED, f"  No repo match      : {n_no_match}")
-        cprint(C.DRED, f"  Missing covers     : {len(failed_covers)} total (see report below)")
-    cprint(C.DCYAN,   f"  Converted+Resized  : {counters.converted}")
-    if delete_orphans:
-        cprint(C.DRED, f"  Deleted (or would) : {counters.deleted}")
-    else:
-        cprint(C.RED,  f"  Unmatched kept     : {counters.missing}")
-        if counters.missing:
-            cprint(C.GRAY, "  Tip: run with --delete-orphans to remove them")
+    cprint(C.CYAN, f"  Cover style        : {_STYLE_LABELS.get(cfg.cover_style, cfg.cover_style)}")
+    cprint(C.CYAN, f"  Folders processed  : {len(common)}")
+    _print_counters_block(counters, failed_covers, "cover", "covers",
+                          delete_orphans, dry_run)
+    if not delete_orphans and counters.missing:
+        cprint(C.GRAY, "  Tip: run with --delete-orphans to remove them")
     cprint(C.CYAN, "=============================================")
 
     _print_failed_items("cover", failed_covers, dry_run,
@@ -2822,33 +2821,15 @@ def _print_summary(
         cprint(C.CYAN, "=============================================")
         cprint(C.CYAN, "  BACKGROUNDS SUMMARY")
         _BG_STYLE_LABELS = {"fanart": "Fanart/Heroes", "boxart": "Box art (letterboxed)"}
-        cprint(C.CYAN, f"  BG source          : {_BG_STYLE_LABELS.get(cfg.bg_style, cfg.bg_style)}")
+        cprint(C.CYAN,
+               f"  BG source          : {_BG_STYLE_LABELS.get(cfg.bg_style, cfg.bg_style)}")
         cprint(C.CYAN, "=============================================")
-        cprint(C.YELLOW,  f"  Renamed (or would) : {bg_counters.renamed}")
-        if bg_counters.duplicates:
-            cprint(C.DRED,    f"  Duplicate BGs      : {bg_counters.duplicates}"
-                              + (" (run --delete-orphans to remove)" if not cfg.delete_orphans
-                                 else " (deleted)"))
-        cprint(C.CYAN,    f"  Downloaded         : {bg_counters.downloaded}")
-        cprint(C.GRAY,    f"  Skipped (exist)    : {bg_counters.skipped}")
-        if failed_bgs:
-            n_no_match = sum(1 for _, _, r in failed_bgs if "no game match" in r)
-            n_no_hero  = sum(1 for _, _, r in failed_bgs if "no hero" in r)
-            n_dl_fail  = sum(1 for _, _, r in failed_bgs if "download failed" in r)
-            if n_dl_fail:
-                cprint(C.DRED, f"  Download failures  : {n_dl_fail}")
-            if n_no_match:
-                cprint(C.DRED, f"  No SGDB match      : {n_no_match}")
-            if n_no_hero:
-                cprint(C.DRED, f"  No hero found      : {n_no_hero}")
-            cprint(C.DRED, f"  Missing BGs        : {len(failed_bgs)} total")
-        cprint(C.DCYAN,   f"  Converted+Resized  : {bg_counters.converted}")
-        if delete_orphans:
-            cprint(C.DRED, f"  Deleted (or would) : {bg_counters.deleted}")
-        else:
-            cprint(C.RED,  f"  Unmatched kept     : {bg_counters.missing}")
+        _print_counters_block(
+            bg_counters, failed_bgs or [], "background", "BGs",
+            delete_orphans, dry_run,
+            extra_fail_keys={"no game match": "No SGDB match", "no hero": "No hero found"},
+        )
         cprint(C.CYAN, "=============================================")
-
         _print_failed_items("background", failed_bgs or [], dry_run)
         print()
 
@@ -2927,13 +2908,21 @@ def _run_sync(
                         folder_name=libretro_folder,
                     )
 
-            process_folder(
-                folder, roms_path, covers_path,
-                cfg, repo_files, repo_name,
-                counters, orphans, failed_covers,
-                lb_index=lb_index,
-            )
+            # Wrap per-folder work so a single failure never aborts the orphan
+            # cleanup phase below.  orphans is accumulated across all folders.
+            try:
+                process_folder(
+                    folder, roms_path, covers_path,
+                    cfg, repo_files, repo_name,
+                    counters, orphans, failed_covers,
+                    lb_index=lb_index,
+                )
+            except KeyboardInterrupt:
+                raise  # let Ctrl-C propagate normally
+            except Exception as exc:
+                cprint(C.DRED, f"  ERROR processing folder '{folder}': {exc}")
 
+        # Orphan cleanup — always reached even if individual folders errored above.
         if cfg.delete_orphans and orphans:
             cprint(C.DRED, f"\n--- Deleting {len(orphans)} orphan cover(s) ---")
             for path in orphans:
@@ -2974,14 +2963,21 @@ def _run_sync(
                         script_dir, script_stem,
                         folder_name="Named_Boxarts",
                     )
-            process_bg_folder(
-                folder, roms_path, bgs_path,
-                cfg, bg_counters, bg_orphans, failed_bgs,
-                lb_index=lb_index,
-                repo_files=bg_repo_files,
-                repo_name=bg_repo_name,
-            )
+            # Same guard: ensure bg_orphans accumulate regardless of per-folder errors.
+            try:
+                process_bg_folder(
+                    folder, roms_path, bgs_path,
+                    cfg, bg_counters, bg_orphans, failed_bgs,
+                    lb_index=lb_index,
+                    repo_files=bg_repo_files,
+                    repo_name=bg_repo_name,
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:
+                cprint(C.DRED, f"  ERROR processing bg folder '{folder}': {exc}")
 
+        # Orphan cleanup — always reached.
         if cfg.delete_orphans and bg_orphans:
             cprint(C.DRED, f"\n--- Deleting {len(bg_orphans)} orphan background(s) ---")
             for path in bg_orphans:
@@ -2991,7 +2987,8 @@ def _run_sync(
             print()
 
         if not cfg.dry_run:
-            _resize_pass(bgs_base, cfg, bg_counters, target_dims="1920x1080", valid_dims=frozenset(VALID_BG_DIMS), label="background JPG",
+            _resize_pass(bgs_base, cfg, bg_counters, target_dims="1920x1080",
+                         valid_dims=frozenset(VALID_BG_DIMS), label="background JPG",
                          gravity="East" if cfg.bg_style == "boxart" else "center")
 
     # ----------------------------------------------------------------
@@ -3404,7 +3401,13 @@ def main() -> None:
     parser.add_argument("--report",           default="",
                         help="Report file path. Defaults to sync-covers_report_YYYYMMDD_HHMMSS.txt "
                              "next to the script. Pass 'none' to disable.")
+    parser.add_argument("--test", action="store_true",
+                        help="Run built-in unit tests and exit")
     args = parser.parse_args()
+
+    if args.test:
+        _run_tests()
+        return   # _run_tests calls sys.exit — this is unreachable but satisfies linters
 
     # Extract credentials immediately and scrub them from args so they don't
     # linger in argparse.Namespace.__repr__ (visible in tracebacks / logs).
@@ -3557,7 +3560,215 @@ def main() -> None:
         report_path = report_path,
     )
 
+# =============================================================================
+# UNIT TESTS
+# Run with: python sync-covers_refactored.py --test
+# or:       python -m pytest sync-covers_refactored.py  (requires pytest)
+# =============================================================================
+import unittest
+
+
+class TestNormalize(unittest.TestCase):
+    """_TAG_RE, strip_tags, normalize — pure string functions."""
+
+    def test_strip_parens(self):
+        self.assertEqual(strip_tags("Game (USA)"), "Game")
+
+    def test_strip_brackets(self):
+        self.assertEqual(strip_tags("Game [Rev 1]"), "Game")
+
+    def test_strip_multiple(self):
+        self.assertEqual(strip_tags("Game (USA) [Beta]"), "Game")
+
+    def test_normalize_strips_seqnum(self):
+        self.assertEqual(normalize("Game_1"), "Game")
+
+    def test_normalize_preserves_normal(self):
+        self.assertEqual(normalize("Super Mario World"), "Super Mario World")
+
+    def test_normalize_strips_region_and_seq(self):
+        self.assertEqual(normalize("Game (Japan)_2"), "Game")
+
+
+class TestSimilarity(unittest.TestCase):
+    """Core fuzzy matching — no I/O."""
+
+    def test_exact_match(self):
+        self.assertAlmostEqual(similarity("Super Mario World", "Super Mario World"), 1.0)
+
+    def test_case_insensitive(self):
+        self.assertAlmostEqual(similarity("super mario world", "Super Mario World"), 1.0)
+
+    def test_region_tag_ignored(self):
+        s = similarity("Super Mario World (USA)", "Super Mario World")
+        self.assertGreaterEqual(s, 0.95)
+
+    def test_different_games_low_score(self):
+        s = similarity("Zelda Link to the Past", "Super Mario World")
+        self.assertLess(s, 0.5)
+
+    def test_prefix_match(self):
+        s = similarity("Super Mario World (USA)", "Super Mario World (Europe)")
+        self.assertGreaterEqual(s, 0.88)  # normalized-prefix tier
+
+    def test_empty_string(self):
+        self.assertEqual(similarity("", "Super Mario"), 0.0)
+
+
+class TestRegionOf(unittest.TestCase):
+    def test_usa(self):
+        self.assertEqual(region_of("Game (USA)"), "usa")
+
+    def test_europe(self):
+        self.assertEqual(region_of("Game (Europe)"), "europe")
+
+    def test_japan(self):
+        self.assertEqual(region_of("Game (Japan)"), "japan")
+
+    def test_world(self):
+        self.assertEqual(region_of("Game (World)"), "world")
+
+    def test_multi_tag_first_wins(self):
+        # "(Japan, USA)" → first listed = japan
+        self.assertEqual(region_of("Game (Japan, USA)"), "japan")
+
+    def test_no_tag(self):
+        self.assertIsNone(region_of("Game Without Tags"))
+
+    def test_australia_maps_to_europe(self):
+        self.assertEqual(region_of("Game (Australia)"), "europe")
+
+
+class TestProgressTracker(unittest.TestCase):
+    def test_sequential_ticks(self):
+        t = _ProgressTracker(total=3, label="X")
+        self.assertEqual(t.tick(), (1, 3))
+        self.assertEqual(t.tick(), (2, 3))
+        self.assertEqual(t.tick(), (3, 3))
+
+    def test_bulk_tick(self):
+        t = _ProgressTracker(total=10)
+        done, total = t.tick(5)
+        self.assertEqual(done, 5)
+        self.assertEqual(total, 10)
+
+    def test_thread_safety(self):
+        import threading as _t
+        tracker = _ProgressTracker(total=100)
+        results = []
+        lock = _t.Lock()
+
+        def worker():
+            d, _ = tracker.tick()
+            with lock:
+                results.append(d)
+
+        threads = [_t.Thread(target=worker) for _ in range(100)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        self.assertEqual(sorted(results), list(range(1, 101)))
+
+
+class TestResolveSystemFolder(unittest.TestCase):
+    def test_exact_key(self):
+        repo, tier = resolve_system_folder("snes")
+        self.assertEqual(repo, SYSTEM_MAP["snes"])
+        self.assertEqual(tier, "exact")
+
+    def test_case_insensitive_exact(self):
+        repo, tier = resolve_system_folder("SNES")
+        self.assertEqual(tier, "exact")
+
+    def test_alias(self):
+        repo, tier = resolve_system_folder("Nintendo 64")
+        self.assertEqual(tier, "alias")
+        self.assertEqual(repo, SYSTEM_MAP["n64"])
+
+    def test_unknown_folder(self):
+        repo, tier = resolve_system_folder("unknown_system_xyz")
+        self.assertEqual(repo, "")
+        self.assertEqual(tier, "")
+
+
+class TestCounters(unittest.TestCase):
+    def test_initial_zero(self):
+        c = Counters()
+        for field in ("renamed", "deleted", "missing", "downloaded", "skipped",
+                      "converted", "duplicates"):
+            self.assertEqual(getattr(c, field), 0)
+
+    def test_inc(self):
+        c = Counters()
+        c.inc("downloaded")
+        c.inc("downloaded", 4)
+        self.assertEqual(c.downloaded, 5)
+
+    def test_dec(self):
+        c = Counters()
+        c.inc("downloaded", 3)
+        c.inc("downloaded", -1)
+        self.assertEqual(c.downloaded, 2)
+
+    def test_invalid_field_raises(self):
+        c = Counters()
+        with self.assertRaises(AttributeError):
+            c.inc("nonexistent_field")
+
+
+class TestSMCHeaderOffset(unittest.TestCase):
+    def _make_path(self, suffix: str) -> Path:
+        return Path(f"dummy{suffix}")
+
+    def test_headered_smc(self):
+        # 512-byte header: size % 1024 == 512, extension .smc
+        size = 512 * 1024 + 512   # e.g. 524800
+        self.assertEqual(_smc_header_offset(self._make_path(".smc"), size), 512)
+
+    def test_clean_sfc(self):
+        # No header: size % 1024 == 0
+        size = 512 * 1024
+        self.assertEqual(_smc_header_offset(self._make_path(".sfc"), size), 0)
+
+    def test_wrong_extension(self):
+        size = 512 * 1024 + 512
+        self.assertEqual(_smc_header_offset(self._make_path(".nes"), size), 0)
+
+    def test_tiny_file_not_stripped(self):
+        # size <= 512 must not be stripped (would produce 0 or negative content)
+        self.assertEqual(_smc_header_offset(self._make_path(".smc"), 512), 0)
+
+
+class TestNormFolder(unittest.TestCase):
+    def test_collapses_separators(self):
+        self.assertEqual(_norm_folder("Nintendo_64"), "nintendo 64")
+        self.assertEqual(_norm_folder("Nintendo-64"), "nintendo 64")
+        self.assertEqual(_norm_folder("Nintendo 64"), "nintendo 64")
+
+    def test_strips_edges(self):
+        self.assertEqual(_norm_folder("  snes  "), "snes")
+
+
+def _run_tests() -> None:
+    """Run the built-in unit-test suite and exit with an appropriate code."""
+    import sys as _sys
+    loader  = unittest.TestLoader()
+    suite   = unittest.TestSuite()
+    for cls in (
+        TestNormalize, TestSimilarity, TestRegionOf,
+        TestProgressTracker, TestResolveSystemFolder,
+        TestCounters, TestSMCHeaderOffset, TestNormFolder,
+    ):
+        suite.addTests(loader.loadTestsFromTestCase(cls))
+    runner  = unittest.TextTestRunner(verbosity=2)
+    result  = runner.run(suite)
+    _sys.exit(0 if result.wasSuccessful() else 1)
+
+
 if __name__ == "__main__":
+    if "--test" in sys.argv:
+        _run_tests()
     try:
         main()
     except KeyboardInterrupt:
