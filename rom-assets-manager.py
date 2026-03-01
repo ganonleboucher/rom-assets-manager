@@ -1,3 +1,11 @@
+#TODO
+# Detect duplicate deletion was broken and fixed (dry_run=dry_run) but comments need cleaning
+# Ensure that the orphans list being passed into process_folder is being appended to, not overwritten, 
+#and that the final cleanup loop in _run_sync (at the very bottom of the script) is actually being reached. Currently, 
+#if a folder is skipped or an error occurs, the script might exit before the "Orphan Cleanup" phase.
+# Refacto + simplify/optimize comment: objective >= 3000l
+# Unit Testing + code smell and quality + performance
+
 #!/usr/bin/env python3
 """
 sync-covers.py — Download and sync cover art & backgrounds to a ROM library.
@@ -44,8 +52,6 @@ DEPENDENCIES
                   Linux:   sudo apt install imagemagick
 """
 
-
-
 from __future__ import annotations
 
 import argparse
@@ -74,16 +80,54 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # =============================================================================
-# ANSI COLOURS  (auto-disabled on Windows if not supported)
+# ANSI COLOURS  (auto-disabled when not supported)
 # =============================================================================
 def _ansi(code): return f"\033[{code}m"
 
-USE_COLOR = sys.stdout.isatty() and (
-    os.name != "nt"                       # non-Windows always try ANSI
-    or "WT_SESSION"  in os.environ        # Windows Terminal
-    or "ANSICON"     in os.environ        # ANSICON wrapper
-    or os.environ.get("TERM_PROGRAM") == "vscode"  # VS Code terminal
-)
+def _try_enable_windows_ansi() -> bool:
+    """Enable ANSI virtual terminal processing on Windows via SetConsoleMode.
+    PowerShell 7 (pwsh.exe) and cmd.exe on Windows 10+ support ANSI escape
+    codes, but the console mode flag must be set explicitly for them to render.
+    Calling SetConsoleMode with ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004)
+    activates it for the current process.  Returns True on success.
+    On non-Windows, importing ctypes.windll raises AttributeError — caught and
+    returns False so callers need no platform guard.
+    """
+    try:
+        import ctypes, ctypes.wintypes
+        STD_OUTPUT_HANDLE    = -11
+        ENABLE_VT_PROCESSING = 0x0004
+        handle = ctypes.windll.kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        if handle == ctypes.wintypes.HANDLE(-1).value:
+            return False
+        mode = ctypes.wintypes.DWORD()
+        if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        if mode.value & ENABLE_VT_PROCESSING:
+            return True
+        return bool(ctypes.windll.kernel32.SetConsoleMode(
+            handle, mode.value | ENABLE_VT_PROCESSING))
+    except Exception:
+        return False
+
+def _detect_color_support() -> bool:
+    """Return True if the terminal is likely to render ANSI escape codes."""
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True                                    # Linux / macOS: always supported
+    # Windows: try to activate VT processing via the Win32 console API.
+    # This covers PowerShell 7, cmd.exe, and Windows Terminal in one call.
+    if _try_enable_windows_ansi():
+        return True
+    # Fallback env-var checks for third-party wrappers that handle ANSI themselves.
+    return (
+        "WT_SESSION" in os.environ                     # Windows Terminal
+        or "ANSICON" in os.environ                     # ANSICON wrapper
+        or os.environ.get("TERM_PROGRAM") == "vscode"  # VS Code terminal
+    )
+
+USE_COLOR = _detect_color_support()
 
 class C:
     # Prefix "D" = bright/distinct variant of the base colour
@@ -106,7 +150,6 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 def _strip_ansi(s: str) -> str:
     """Remove ANSI colour escape sequences from a string."""
     return _ANSI_RE.sub("", s)
-
 
 class ReportTee:
     """Context manager: duplicates sys.stdout to a plain-text report file.
@@ -141,7 +184,6 @@ class ReportTee:
     def __exit__(self, *_):
         sys.stdout = self._orig
         self._fh.close()
-
 
 # =============================================================================
 # SYSTEM MAP  --  local folder name -> libretro-thumbnails repo name
@@ -386,7 +428,6 @@ _ROM_MAGIC: tuple[tuple[int, bytes, str], ...] = (
 )
 _ROM_MAGIC_READ_SIZE: int = max(o + len(m) for o, m, _ in _ROM_MAGIC) + 1
 
-
 def _sniff_rom_header(path: Path) -> str | None:
     """Return the SYSTEM_MAP key for path based on ROM magic bytes, or None."""
     try:
@@ -399,7 +440,6 @@ def _sniff_rom_header(path: Path) -> str | None:
         if len(header) >= end and header[offset:end] == magic:
             return key
     return None
-
 
 def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
     """Inspect files in rom_dir to infer the system. Returns (system_key, tier).
@@ -447,7 +487,6 @@ def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
 
     return "", ""
 
-
 def _tier_msg(folder: str, repo_name: str, match_tier: str, kind: str = "covers") -> None:
     """Print a resolver info line for non-exact matches."""
     fallback = "SGDB/LaunchBox only" if kind == "covers" else "LaunchBox fanart only"
@@ -459,13 +498,10 @@ def _tier_msg(folder: str, repo_name: str, match_tier: str, kind: str = "covers"
     elif not repo_name:
         cprint(C.GRAY, f"  [{folder}] → unrecognised folder — {fallback}")
 
-
 def resolve_system_folder(folder: str, rom_dir: Path | None = None) -> tuple[str, str]:
     """Map a ROM folder name to (repo_name, tier).
-
     repo_name: libretro-thumbnails repo slug, or "" if unresolved.
     tier:      "exact" | "alias" | "content-ext" | "content-header" | ""
-
     rom_dir: path to the actual ROM folder for Tier 3 content inspection.
              If None or non-existent, Tier 3 is skipped.
     """
@@ -488,7 +524,6 @@ def resolve_system_folder(folder: str, rom_dir: Path | None = None) -> tuple[str
             return SYSTEM_MAP[content_key], content_tier
 
     return "", ""
-
 
 BASE_RAW_URL = "https://raw.githubusercontent.com/libretro-thumbnails"
 BASE_API_URL = "https://api.github.com/repos/libretro-thumbnails"
@@ -542,11 +577,9 @@ def region_of(name: str) -> str | None:
                     return key
     return None
 
-
 def sort_by_region(candidates: list[tuple[str, float]],
                    preferred: str) -> list[tuple[str, float]]:
     """Stable re-sort of ranked_matches output to prefer a region.
-
     Adds a small bonus to the sort key so that a preferred-region cover
     beats same-score variants without overriding a genuinely better-scoring
     different title.  Bonuses:
@@ -572,7 +605,6 @@ def sort_by_region(candidates: list[tuple[str, float]],
 
     return sorted(candidates, key=sort_key)
 
-
 # =============================================================================
 # FUZZY MATCHING
 # =============================================================================
@@ -587,7 +619,6 @@ def strip_tags(name: str) -> str:
 
 def normalize(name: str) -> str:
     """Strip region/language tags and trailing sequence numbers (_1, _2…) for cover matching.
-
     This is a name normalisation step for fuzzy cover lookup only — it does NOT
     imply the file is a duplicate.  Duplicate detection is content-based (CRC32 + SHA-1)
     and lives entirely in check_duplicates(), which never calls this function.
@@ -663,13 +694,11 @@ def ranked_matches(rom: str, candidates: list[str],
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:top_n]
 
-
 # =============================================================================
 # IMAGEMAGICK
 # =============================================================================
 def find_magick() -> str | None:
     """Probe for a working ImageMagick binary.
-
     Tries 'magick' (v7) then 'convert' (v6) in order.
     shutil.which() only confirms the binary is on PATH; it cannot detect a
     broken alias (wrong architecture, missing shared libs, etc.).  We
@@ -694,7 +723,6 @@ def find_magick() -> str | None:
 def magick_resize(magick: str, src: str, dst: str,
                   dims: str = "512x512", gravity: str = "center") -> None:
     """Letterbox-resize src -> dst at dims (e.g. '512x512', '1920x1080').
-
     gravity: ImageMagick gravity value controlling canvas placement.
              'center' (default) — image centred on black bars (covers, fanart).
              'East'             — image flush-right (boxart backgrounds).
@@ -748,7 +776,6 @@ def _sgdb_get_json(url: str, key: str, context: str = "") -> dict | None:
         cprint(C.GRAY, f"  SGDB unexpected error{f' ({context})' if context else ''}: {e}")
     return None
 
-
 def sgdb_search_game(name: str, key: str) -> int | None:
     """Return the first SteamGridDB game_id matching name, or None."""
     term = normalize(name).strip() or name.strip()
@@ -757,7 +784,6 @@ def sgdb_search_game(name: str, key: str) -> int | None:
     if data and data.get("success") and data.get("data"):
         return int(data["data"][0]["id"])
     return None
-
 
 def sgdb_get_cover_url(game_id: int, key: str) -> str | None:
     """Return the URL of the highest-voted vertical grid for game_id, or None."""
@@ -768,7 +794,6 @@ def sgdb_get_cover_url(game_id: int, key: str) -> str | None:
     if data and data.get("success") and data.get("data"):
         return data["data"][0]["url"]
     return None
-
 
 def sgdb_get_hero_url(game_id: int, key: str) -> str | None:
     """Return the URL of the best SGDB hero image for game_id, or None.
@@ -782,7 +807,6 @@ def sgdb_get_hero_url(game_id: int, key: str) -> str | None:
     if data and data.get("success") and data.get("data"):
         return data["data"][0]["url"]
     return None
-
 
 # =============================================================================
 # LAUNCHBOX GAMESDB — offline XML database
@@ -829,12 +853,10 @@ _LBDB_REGION_PRIORITY: list[str] = ["world", "usa", "europe", "japan"]
 
 LbIndex = dict  # normalized_name -> {img_type -> [(region_key, filename)]}
 
-
 def _lbdb_region_rank(preferred: str) -> dict[str, int]:
     """Return {region_key: sort_rank} with preferred first."""
     order = [preferred] + [r for r in _LBDB_REGION_PRIORITY if r != preferred]
     return {r: i for i, r in enumerate(order)}
-
 
 # Image types indexed from LaunchBox — defined at module level so the tuple
 # is not reconstructed on every XML element during the streaming parse.
@@ -842,21 +864,11 @@ _LBDB_INDEXED_TYPES: frozenset[str] = frozenset((
     _LBDB_TYPE_COVER, _LBDB_TYPE_BG, _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
 ))
 
-
 def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
     """Parse Metadata.zip bytes into the in-memory index.
-
     Returns: { normalized_name: { img_type: [(region_key, filename), ...] } }
-
     Uses ET.iterparse + zf.open() to stream-decompress each XML file instead
     of loading the full decompressed bytes into memory first (ET.fromstring).
-    The LaunchBox XML decompresses to ~500 MB; streaming keeps peak RAM usage
-    roughly half that, which matters on low-memory devices (e.g. RPi 4 1 GB).
-
-    Single-pass assumption: <Game> elements always precede <GameImage> elements
-    in the LaunchBox XML schema, which has been stable since v2.  If that ever
-    changes, db_id_to_norm lookups for early GameImages will simply miss and
-    those images will be silently skipped — safe degradation, not a crash.
     """
     index: dict = {}
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -897,7 +909,6 @@ def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
                 continue
     return index
 
-
 def sgdb_get_logo_url(game_id: int, key: str) -> str | None:
     """Return the URL of the best SteamGridDB logo image for game_id, or None.
     Logos are transparent PNGs with the game title art — no system logo.
@@ -909,7 +920,6 @@ def sgdb_get_logo_url(game_id: int, key: str) -> str | None:
         return data["data"][0]["url"]
     return None
 
-
 def lbdb_load_index(
     ttl_hours: int,
     script_dir: Path,
@@ -917,7 +927,6 @@ def lbdb_load_index(
     timeout: int = 90,
 ) -> LbIndex:
     """Download + cache LaunchBox Metadata.zip; return in-memory index.
-
     Cache: <script_dir>/<script_stem>_launchbox.json  (same pattern as GitHub cache)
     TTL  : same as --cache-ttl (default 24 h).
     Returns {} on any failure so callers degrade gracefully.
@@ -977,7 +986,6 @@ def lbdb_load_index(
 
     return index
 
-
 def lbdb_find_url(
     rom_stem: str,
     lb_index: LbIndex,
@@ -986,7 +994,6 @@ def lbdb_find_url(
     threshold: float = 0.70,
 ) -> str | None:
     """Offline LaunchBox lookup.
-
     1. Normalise rom_stem.
     2. Exact-match against index keys (O(1)).
     3. Fuzzy-match against names sharing the first 4-char prefix if no exact hit.
@@ -1023,31 +1030,25 @@ def lbdb_find_url(
     best = min(entries, key=lambda e: rank.get(e[0], len(rank)))
     return f"{LBDB_IMG_BASE}{best[1]}"
 
-
 def lbdb_find_cover_url(rom_stem: str, lb_index: LbIndex,
                         preferred_region: str = "any") -> str | None:
     """Return the best LaunchBox Box-Front URL for rom_stem, or None."""
     return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_COVER, preferred_region)
-
 
 def lbdb_find_logo_url(rom_stem: str, lb_index: LbIndex,
                        preferred_region: str = "any") -> str | None:
     """Return the best LaunchBox Clear Logo URL for rom_stem, or None."""
     return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_LOGO, preferred_region)
 
-
 def lbdb_find_screenshot_url(rom_stem: str, lb_index: LbIndex,
                               preferred_region: str = "any") -> str | None:
     """Return the best LaunchBox Screenshot-Game-Title URL for rom_stem, or None."""
     return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_SCREENSHOT, preferred_region)
 
-
 def lbdb_find_bg_url(rom_stem: str, lb_index: LbIndex,
                      preferred_region: str = "any") -> str | None:
     """Return the best LaunchBox Fanart-Background URL for rom_stem, or None."""
     return lbdb_find_url(rom_stem, lb_index, _LBDB_TYPE_BG, preferred_region)
-
-
 
 # =============================================================================
 # GITHUB API + DISK CACHE
@@ -1055,7 +1056,6 @@ def lbdb_find_bg_url(rom_stem: str, lb_index: LbIndex,
 def _http_get(url: str, token: str | None, bearer: bool = False,
               timeout: int = 30, max_retries: int = 3) -> bytes:
     """Fetch URL with retry-on-transient-error and optional Bearer/token auth.
-
     Retries on: connection errors, HTTP 429 (rate limit), HTTP 5xx.
     Raises immediately on 4xx (except 429) — permanent client errors.
     Backoff: 2^attempt seconds (1s, 2s, 4s).
@@ -1160,7 +1160,6 @@ def _ensure_art_dir(path: Path, label: str, dry_run: bool) -> None:
     else:
         cprint(C.MAGENTA, f"  [DRY RUN] Would create {label} folder: {path}")
 
-
 def _scan_roms(roms_path: Path) -> dict[str, Path]:
     """Scan roms_path recursively, return {stem: path}.
     Skips .sbi files. Warns on duplicate stems (keeps first encountered).
@@ -1177,7 +1176,6 @@ def _scan_roms(roms_path: Path) -> dict[str, Path]:
         else:
             result[p.stem] = p
     return result
-
 
 # =============================================================================
 # PROMPTS
@@ -1285,7 +1283,6 @@ class SyncConfig:
     sgdb_key:         str | None   # SteamGridDB API key
     http_timeout:     int          # per-request HTTP timeout in seconds
 
-
 # =============================================================================
 # MATCH RESULTS  (structured return types for pure matching functions)
 # =============================================================================
@@ -1296,13 +1293,11 @@ class LibretroMatch:
     jpg_path:   Path
     candidates: list[tuple[str, float]]   # (repo_filename, score), best-first
 
-
 @dataclasses.dataclass
 class LibretroNoMatch:
     """A ROM with no usable candidate in the libretro-thumbnails repo."""
     rom_stem: str
     hint:     str   # "best='x' score=0.23" | "no files in repo"
-
 
 # =============================================================================
 # PROGRESS BAR  (stdlib only, \r overwrites same line in terminal)
@@ -1312,7 +1307,6 @@ def progress_bar(done: int, total: int, width: int = 40, label: str = "") -> str
     bar    = "█" * filled + "░" * (width - filled)
     pct    = int(100 * done / total) if total else 100
     return f"\r  {label}[{bar}] {done}/{total} ({pct}%)"
-
 
 # =============================================================================
 # COVER / BACKGROUND PIPELINE HELPERS
@@ -1328,7 +1322,6 @@ def _fuzzy_rename_pass(
     kind: str = "cover",
 ) -> bool:
     """Fuzzy-rename cover/background files to match ROM stems.
-
     Modifies `existing` in-place for successful renames.
     Returns True if any rename occurred (caller should re-read the directory).
     `kind` is used in log messages: "cover" or "background".
@@ -1391,7 +1384,6 @@ def _fuzzy_rename_pass(
 
     return did_rename
 
-
 def _write_and_convert(
     raw: bytes,
     work_dir: Path,
@@ -1403,7 +1395,6 @@ def _write_and_convert(
     gravity: str = "center",
 ) -> None:
     """Write raw bytes to a temp file, magick-resize to jpg_path, then clean up.
-
     Increments counters.downloaded (+1) and counters.converted (+1) on success.
     Raises subprocess.CalledProcessError if magick fails (tmp cleaned up, counter rolled back).
     Always runs magick — ensures output is always a correctly-sized JPEG regardless
@@ -1427,7 +1418,6 @@ def _write_and_convert(
     tmp.unlink(missing_ok=True)
     counters.inc("converted")
 
-
 def _match_libretro_roms(
     roms_to_dl: list[str],
     covers_path: Path,
@@ -1435,7 +1425,6 @@ def _match_libretro_roms(
     cfg: SyncConfig,
 ) -> tuple[list[LibretroMatch], list[LibretroNoMatch], int]:
     """Match ROMs against the libretro-thumbnails repo. Pure — no I/O or printing.
-
     Returns (matches, no_matches, n_skipped).
     n_skipped: ROMs already covered and skipped (non-zero only in 'missing' mode).
     Caller is responsible for displaying results and updating counters.
@@ -1484,7 +1473,6 @@ def _match_libretro_roms(
 
     return matches, no_matches, n_skipped
 
-
 def _download_clean_covers(
     roms_to_dl: list[str],
     covers_path: Path,
@@ -1495,7 +1483,6 @@ def _download_clean_covers(
     lb_index: LbIndex = None,
 ) -> None:
     """Download clean cover art for without_logo style.
-
     With SGDB key  : SteamGridDB grid → LaunchBox Screenshot-Game-Title fallback.
     Without SGDB key: LaunchBox Screenshot-Game-Title only.
     """
@@ -1555,7 +1542,6 @@ def _download_clean_covers(
             raise
     print()
 
-
 def _find_fallback_url(
     rom_stem:   str,
     lb_index:   LbIndex,
@@ -1566,7 +1552,6 @@ def _find_fallback_url(
     sgdb_first: bool = False,
 ) -> str | None:
     """Generic two-source fallback resolver.
-
     lb_finder  : one of lbdb_find_*_url — called with (rom_stem, lb_index, region).
     sgdb_fn    : one of sgdb_get_*_url  — called with (game_id, key).
                  Pass None to skip SGDB entirely.
@@ -1587,13 +1572,9 @@ def _find_fallback_url(
         return _try_sgdb() or _try_lb() or None
     return _try_lb() or _try_sgdb() or None
 
-
-
-
 def _find_cover_fallback(rom_stem: str, lb_index: LbIndex,
                           cfg: SyncConfig) -> str | None:
     """Fallback chain for without_logo: SGDB grid → LB Screenshot-Game-Title.
-
     Mirrors fanart background priority: SGDB is the primary source when a key
     is set; LB Screenshot is the fallback (or the only source with no key).
     """
@@ -1603,7 +1584,6 @@ def _find_cover_fallback(rom_stem: str, lb_index: LbIndex,
         sgdb_fn=sgdb_get_cover_url,
         sgdb_first=True,
     )
-
 
 def _download_libretro_covers(
     matches:          list[LibretroMatch],
@@ -1620,7 +1600,6 @@ def _download_libretro_covers(
     direct_roms:      list[str] | None = None,
 ) -> None:
     """Download covers using libretro-thumbnails with LB + optional SGDB fallbacks.
-
     lb_folder         : libretro subfolder, e.g. "Named_Boxarts" or "Named_Logos".
     lb_fallback_finder: lbdb_find_*_url to call after libretro candidates exhausted.
     sgdb_fn           : sgdb_get_*_url to call as the PRIMARY source before libretro
@@ -1768,7 +1747,6 @@ def _download_libretro_covers(
             raise
     print()  # newline after progress bar
 
-
 def _download_bg_boxart(
     roms_to_dl: list[str],
     bgs_path: Path,
@@ -1896,7 +1874,6 @@ def _download_bg_boxart(
             raise
     print()  # newline after progress bar
 
-
 def _download_bg_images(
     roms_to_dl: list[str],
     bgs_path: Path,
@@ -1991,7 +1968,6 @@ def _download_bg_images(
             raise
     print()  # newline after progress bar
 
-
 # =============================================================================
 # ORCHESTRATORS
 # =============================================================================
@@ -2004,7 +1980,6 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
                    failed_covers: list[tuple[str, str, str]],
                    lb_index: LbIndex = None) -> None:
     """Process one system folder: rename mismatched covers, then download missing ones.
-
     Dispatches to the SGDB (without_logo) or libretro-thumbnails+LaunchBox (with_logo)
     download pipeline based on cfg.cover_style.
     """
@@ -2139,7 +2114,6 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
             lb_index=lb_idx, direct_roms=direct_roms or None,
         )
 
-
 def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                       cfg: SyncConfig,
                       bg_counters: Counters,
@@ -2149,7 +2123,6 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
                       repo_files: list[str] | None = None,
                       repo_name: str = "") -> None:
     """Process one system folder for background art.
-
     bg_style=="fanart": SGDB Heroes → LaunchBox Fanart-Background.
     bg_style=="boxart": libretro Named_Boxarts → LaunchBox Box-Front (letterboxed).
     Always produces 1920x1080 JPEGs; the resize pass accepts 1280x720 as-is.
@@ -2214,7 +2187,6 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
         _download_bg_images(roms_to_dl, bgs_path, folder, cfg, bg_counters, failed_bgs,
                             lb_index=lb_index)
 
-
 # =============================================================================
 # CRC32 DUPLICATE DETECTION
 # =============================================================================
@@ -2267,6 +2239,13 @@ ROM_EXTENSIONS = {
     ".rom",                          # generic cartridge dump
 }
 
+# Multi-track disc dumps (.bin/.cue) contain CDDA audio tracks alongside the
+# data track. Audio tracks are named "… (Track N).bin" or "… Track N.bin".
+# They are raw PCM and can be byte-identical across different games (same-
+# length silence, shared audio libraries, identical music), so they must be
+# excluded from duplicate detection entirely — they are not game data.
+_CDDA_TRACK_RE = re.compile(r'\btrack\s*\d+\b', re.IGNORECASE)
+
 # SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
 # prepended to the raw ROM data.  The header is not part of the game content,
 # so two identical ROMs — one headered (.smc) and one headerless (.sfc or a
@@ -2281,10 +2260,8 @@ ROM_EXTENSIONS = {
 _SMC_HEADER_SIZE: int       = 512
 _SMC_HEADER_EXTS: frozenset = frozenset({".smc", ".sfc"})
 
-
 def _smc_header_offset(path: Path, size: int) -> int:
     """Return 512 if path looks like a headered SNES ROM, else 0.
-
     Used by both the Stage-1 size normalisation and the Stage-2 hash to ensure
     both steps agree on which bytes represent the actual ROM content.
     """
@@ -2296,14 +2273,12 @@ def _smc_header_offset(path: Path, size: int) -> int:
         else 0
     )
 
-
 # ---------------------------------------------------------------------------
 # Hashing helpers
 # ---------------------------------------------------------------------------
 def _hash_file(path: Path, offset: int = 0,
                chunk_size: int = 1 << 20) -> tuple[str, str] | None:
     """Read path once (skipping leading `offset` bytes), computing CRC32 + SHA-1.
-
     offset: bytes to skip at the start of the file (e.g. SMC copier header).
             Must be obtained from _smc_header_offset() so Stage 1 and Stage 2
             always agree on the effective ROM content.
@@ -2328,7 +2303,6 @@ def _hash_file(path: Path, offset: int = 0,
     except Exception:  # OSError, MemoryError, unexpected hashlib error, etc.
         return None
 
-
 def check_duplicates(roms_base: Path, common: list[str],
                      single_system: bool, parallel_jobs: int,
                      dry_run: bool = True) -> None:
@@ -2337,7 +2311,6 @@ def check_duplicates(roms_base: Path, common: list[str],
       1. Group by file size    (free — stat() already needed for reporting)
       2. CRC32 + SHA-1 on size-candidates only  (skip unique-size files)
       3. Confirm by (size, CRC32, SHA-1) agreement
-
     Empty files (size == 0) are reported separately as broken/placeholder ROMs
     rather than being falsely grouped as duplicates of each other.
     A file is only reported as a duplicate when size + CRC32 + SHA-1 all agree.
@@ -2362,6 +2335,10 @@ def check_duplicates(roms_base: Path, common: list[str],
             continue
         for p in rom_dir.rglob("*.*"):   # *.*  skips bare directories efficiently
             if p.is_file() and p.suffix.lower() in ROM_EXTENSIONS:
+                # Skip CDDA audio tracks — they are raw PCM, not game data,
+                # and can be byte-identical across unrelated games.
+                if _CDDA_TRACK_RE.search(p.stem):
+                    continue
                 all_rom_files.append(p)
 
     if not all_rom_files:
@@ -2499,14 +2476,12 @@ def check_duplicates(roms_base: Path, common: list[str],
 
     _report_duplicates(confirmed, empty_files, unreadable, all_rom_files, dry_run=dry_run)
 
-
 def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                        empty_files: list[Path],
                        unreadable: list[Path],
                        all_rom_files: list[Path],
                        dry_run: bool = True) -> None:
     """Print the final duplicate report, then prompt the user to delete if duplicates exist.
-
     confirmed: list of groups, each group is [(path, crc32_hex, sha1_hex, size_bytes), ...]
     dry_run:   when True the deletion prompt is shown but no files are removed;
                the user still sees exactly what would happen.
@@ -2579,7 +2554,6 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
 
     _prompt_delete_duplicates(confirmed, dry_run=dry_run)
 
-
 # Keep-strategy sort keys: each returns (primary_sort_key, path) so the first
 # element after sorting is the file to KEEP.
 _KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[tuple[Path,str,str,int]], tuple]"]] = {
@@ -2589,11 +2563,9 @@ _KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[tuple[Path,str,str,int]], tupl
     "4": ("newest file",        lambda t: (-t[0].stat().st_mtime if t[0].exists() else 0, t[0].name)),
 }
 
-
 def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                               dry_run: bool = True) -> None:
     """Ask the user whether and how to clean up confirmed duplicate groups.
-
     Flow:
       1. Ask whether to delete at all.
       2. Ask which file to keep (strategy applies to every group uniformly).
@@ -2676,7 +2648,6 @@ def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     cprint(C.CYAN, f"  Done — {deleted} file(s) deleted.")
     print()
 
-
 def _detect_systems(roms_base: Path, system_arg: str,
                     rom_ext_filter: set[str] | None = None) -> tuple[list[str], bool]:
     """Return (common, single_system) based on roms_base layout and --system arg.
@@ -2714,7 +2685,6 @@ def _detect_systems(roms_base: Path, system_arg: str,
     else:
         return sorted(rom_subs), False
 
-
 def _resize_pass(
     base: Path, cfg: SyncConfig, counters: Counters,
     target_dims: str = "512x512",
@@ -2723,7 +2693,6 @@ def _resize_pass(
     gravity: str = "center",
 ) -> None:
     """Resize all JPGs under base that aren't already the right size.
-
     target_dims : magick resize target (e.g. '512x512', '1920x1080').
     valid_dims  : set of already-correct dimension strings; defaults to {target_dims}.
     label       : display label used in progress messages.
@@ -2788,7 +2757,6 @@ def _resize_pass(
             pool.shutdown(wait=False, cancel_futures=True)
             raise
     print()  # newline after progress bar
-
 
 def _print_summary(
     counters: Counters,
@@ -2884,7 +2852,6 @@ def _print_summary(
         _print_failed_items("background", failed_bgs or [], dry_run)
         print()
 
-
 def _print_failed_items(
     label: str,
     failed: list[tuple[str, str, str]],
@@ -2907,7 +2874,6 @@ def _print_failed_items(
     print()
     if tip:
         cprint(C.GRAY, f"  Tip: {tip}")
-
 
 # =============================================================================
 # EXECUTION CORE  (called by both wizard and CLI paths)
@@ -3043,7 +3009,6 @@ def _run_sync(
                        bg_counters=bg_counters,
                        failed_bgs=failed_bgs or None)
 
-
 # =============================================================================
 # WIZARD  (interactive guided flow, used when no substantive args are given)
 # =============================================================================
@@ -3062,7 +3027,6 @@ def _wiz_banner(dry_run: bool) -> None:
     else:
         cprint(C.RED, "  ⚡  LIVE mode  — files WILL be written/deleted")
     print()
-
 
 def _wiz_confirm(dry_run: bool, task: str, opts: dict[str, str]) -> None:
     """Print a compact summary of what's about to run, then pause."""
@@ -3083,10 +3047,8 @@ def _wiz_confirm(dry_run: bool, task: str, opts: dict[str, str]) -> None:
         raise
     print()
 
-
 def _prompt_sgdb_key(existing: str, required: bool = False) -> str | None:
     """Prompt for SteamGridDB API key with echo suppressed (like a password).
-
     required=False (default): key is optional; returns "" if skipped.
     required=True: legacy — warns more strongly but still allows skipping.
     """
@@ -3109,14 +3071,12 @@ def _prompt_sgdb_key(existing: str, required: bool = False) -> str | None:
         print(); raise
     return (key or None) if required else key
 
-
 def _wiz_cover_options(
     need_covers: bool,
     need_bgs:    bool,
     sgdb_key:    str,
 ) -> tuple[str, str, str, str]:
     """Wizard steps 8-9: prompt for cover style, region, bg style, and SGDB key.
-
     Returns (cover_style, preferred_region, sgdb_key, bg_style).
     Contains all branching logic for cover and background styles so _wizard
     stays at a high level.
@@ -3174,7 +3134,6 @@ def _wiz_cover_options(
 
     return cover_style, preferred_region, sgdb_key, bg_style
 
-
 def _wiz_build_confirm_opts(
     roms_base:        Path,
     covers_base:      "Path | None",
@@ -3190,7 +3149,6 @@ def _wiz_build_confirm_opts(
     need_bgs:         bool = False,
 ) -> dict[str, str]:
     """Assemble the ordered confirmation summary dict for _wiz_confirm.
-
     Pure function — no I/O, no prompts. Returns {label: value} for display.
     """
     _STYLE_CONFIRM = {
@@ -3216,7 +3174,6 @@ def _wiz_build_confirm_opts(
     if report_path:
         opts["Report"] = str(report_path)
     return opts
-
 
 def _wizard(
     dry_run:     bool,
@@ -3289,10 +3246,8 @@ def _wizard(
     # ── 6. Duplicate check (early exit) ──────────────────────────────
     if is_dup:
         print()
-        # Wizard always runs in dry_run mode for dedup — to actually delete,
-        # use CLI: python sync-covers.py --check-duplicates --no-dry-run --roms ...
         check_duplicates(roms_base, common, single_system, args.parallel_jobs,
-                         dry_run=True)
+                         dry_run=dry_run)
         sys.exit(0)
 
     # ── 7. Download options ───────────────────────────────────────────
@@ -3391,7 +3346,6 @@ def _wizard(
         script_stem = script_stem,
         report_path = report_path,
     )
-
 
 # =============================================================================
 # MAIN
@@ -3602,7 +3556,6 @@ def main() -> None:
         script_stem = script_stem,
         report_path = report_path,
     )
-
 
 if __name__ == "__main__":
     try:
