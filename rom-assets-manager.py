@@ -380,10 +380,16 @@ def find_magick() -> str | None:
             pass  # binary exists but is non-functional — try next
     return None
 
-def magick_resize(magick: str, src: str, dst: str, dims: str = "512x512") -> None:
-    """Letterbox-resize src -> dst at dims (e.g. '512x512', '1920x1080')."""
+def magick_resize(magick: str, src: str, dst: str,
+                  dims: str = "512x512", gravity: str = "center") -> None:
+    """Letterbox-resize src -> dst at dims (e.g. '512x512', '1920x1080').
+
+    gravity: ImageMagick gravity value controlling canvas placement.
+             'center' (default) — image centred on black bars (covers, fanart).
+             'East'             — image flush-right (boxart backgrounds).
+    """
     subprocess.run(
-        [magick, src, "-resize", dims, "-gravity", "center",
+        [magick, src, "-resize", dims, "-gravity", gravity,
          "-background", "black", "-extent", dims, dst],
         check=True, capture_output=True
     )
@@ -1067,6 +1073,7 @@ def _write_and_convert(
     magick: str,
     counters: Counters,
     dims: str = "512x512",
+    gravity: str = "center",
 ) -> None:
     """Write raw bytes to a temp file, magick-resize to jpg_path, then clean up.
 
@@ -1074,13 +1081,14 @@ def _write_and_convert(
     Raises subprocess.CalledProcessError if magick fails (tmp cleaned up, counter rolled back).
     Always runs magick — ensures output is always a correctly-sized JPEG regardless
     of source format or original resolution.
+    gravity: passed through to magick_resize (see its docstring).
     """
     ext = ".png" if is_valid_png(raw) else (".webp" if is_webp(raw) else ".jpg")
     tmp = work_dir / f"{stem}.tmp{ext}"
     tmp.write_bytes(raw)
     counters.inc("downloaded")
     try:
-        magick_resize(magick, str(tmp), str(jpg_path), dims=dims)
+        magick_resize(magick, str(tmp), str(jpg_path), dims=dims, gravity=gravity)
     except subprocess.CalledProcessError:
         tmp.unlink(missing_ok=True)
         counters.inc("downloaded", -1)  # undo — bad PNG, caller tries next candidate
@@ -1487,7 +1495,8 @@ def _download_bg_boxart(
                 continue
             try:
                 _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080")
+                                   cfg.magick, bg_counters, dims="1920x1080",
+                                   gravity="East")
             except Exception:
                 continue
             with bg_lock:
@@ -1503,7 +1512,8 @@ def _download_bg_boxart(
             try:
                 raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080")
+                                   cfg.magick, bg_counters, dims="1920x1080",
+                                   gravity="East")
                 with bg_lock:
                     bg_done += 1; dd, dt = bg_done, bg_total
                 with print_lock:
@@ -1529,7 +1539,8 @@ def _download_bg_boxart(
             try:
                 raw = _http_get(lb_url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, bgs_path, rom_stem, jpg_path,
-                                   cfg.magick, bg_counters, dims="1920x1080")
+                                   cfg.magick, bg_counters, dims="1920x1080",
+                                   gravity="East")
                 with bg_lock:
                     bg_done += 1; dd, dt = bg_done, bg_total
                 with print_lock:
@@ -2162,12 +2173,14 @@ def _resize_pass(
     target_dims: str = "512x512",
     valid_dims: frozenset[str] | None = None,
     label: str = "JPG",
+    gravity: str = "center",
 ) -> None:
     """Resize all JPGs under base that aren't already the right size.
 
     target_dims : magick resize target (e.g. '512x512', '1920x1080').
     valid_dims  : set of already-correct dimension strings; defaults to {target_dims}.
     label       : display label used in progress messages.
+    gravity     : ImageMagick gravity for canvas placement (see magick_resize).
     """
     if not cfg.magick:
         return
@@ -2206,7 +2219,7 @@ def _resize_pass(
     def resize_one(jpg: Path):
         nonlocal resize_done
         try:
-            magick_resize(cfg.magick, str(jpg), str(jpg), dims=target_dims)
+            magick_resize(cfg.magick, str(jpg), str(jpg), dims=target_dims, gravity=gravity)
             counters.inc("converted")
             with resize_lock:
                 resize_done += 1
@@ -2463,7 +2476,8 @@ def _run_sync(
             print()
 
         if not cfg.dry_run:
-            _resize_pass(bgs_base, cfg, bg_counters, target_dims="1920x1080", valid_dims=frozenset(VALID_BG_DIMS), label="background JPG")
+            _resize_pass(bgs_base, cfg, bg_counters, target_dims="1920x1080", valid_dims=frozenset(VALID_BG_DIMS), label="background JPG",
+                         gravity="East" if cfg.bg_style == "boxart" else "center")
 
     # ----------------------------------------------------------------
     # Summary + report
