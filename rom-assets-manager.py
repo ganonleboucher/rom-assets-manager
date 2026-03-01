@@ -3793,7 +3793,7 @@ def _wizard(
     )
 
     _run_sync(
-        task        = {"2":"both","3":"covers","4":"backgrounds"}[task_ch],
+        task        = {"3":"both","4":"covers","5":"backgrounds"}[task_ch],
         roms_base   = roms_base,
         covers_base = covers_base,
         bgs_base    = bgs_base,
