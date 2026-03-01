@@ -17,22 +17,24 @@ DEPENDENCIES
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
-import io
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
@@ -2603,69 +2605,77 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     cprint(C.CYAN, "=============================================")
     print()
 
-    if not confirmed:
+    if not confirmed and not suspected:
         return
 
     # ------------------------------------------------------------------
-    # Interactive deletion prompt — only when stdout is a real terminal.
+    # Interactive deletion prompts — only when stdout is a real terminal.
     # Piped/redirected runs (CI, scripts) skip silently so they never block.
     # ------------------------------------------------------------------
     if not sys.stdout.isatty():
         return
 
-    _prompt_delete_duplicates(confirmed, dry_run=dry_run)
+    if confirmed:
+        # Convert (path, crc, sha, size) tuples to plain Path lists for the
+        # shared deletion helper (CRC/SHA are not needed for the deletion flow).
+        confirmed_paths_only = [[p for p, _, _, _ in g] for g in confirmed]
+        _prompt_delete_group("CLEANUP — EXACT DUPLICATES", confirmed_paths_only, dry_run)
 
-# Keep-strategy sort keys: each returns (primary_sort_key, path) so the first
-# element after sorting is the file to KEEP.
-_KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[tuple[Path,str,str,int]], tuple]"]] = {
-    "1": ("shortest filename",  lambda t: (len(t[0].name),  t[0].name)),
-    "2": ("smallest file size", lambda t: (t[3],             t[0].name)),
-    "3": ("oldest file",        lambda t: (t[0].stat().st_mtime if t[0].exists() else 0, t[0].name)),
-    "4": ("newest file",        lambda t: (-t[0].stat().st_mtime if t[0].exists() else 0, t[0].name)),
+    if suspected:
+        cprint(C.DYELLOW,
+               "  Same-title pairs have DIFFERENT content (regional variant / patch).")
+        cprint(C.DYELLOW,
+               "  Review carefully — you may want to keep both versions.")
+        _prompt_delete_group("CLEANUP — SAME-TITLE PAIRS", suspected, dry_run)
+
+# Keep-strategy sort keys — operate on plain Path objects.
+# Each returns (primary_sort_key, name) so the first element after sorting
+# is the file to KEEP.
+_KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple]"]] = {
+    "1": ("shortest filename",  lambda p: (len(p.name), p.name)),
+    "2": ("smallest file size", lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
+    "3": ("oldest file",        lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
+    "4": ("newest file",        lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
 }
 
-def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
-                              dry_run: bool = True) -> None:
-    """Ask the user whether and how to clean up confirmed duplicate groups.
+def _prompt_delete_group(title: str,
+                         groups: list[list[Path]],
+                         dry_run: bool) -> None:
+    """Shared deletion prompt used for both exact-duplicate and same-title groups.
+
     Flow:
-      1. Ask whether to delete at all.
-      2. Ask which file to keep (strategy applies to every group uniformly).
-      3. Show a preview of what will be kept / deleted.
-      4. Ask for final confirmation before touching any file.
-    dry_run: when True shows the full preview and confirmation prompt but
-             does not remove any files — matches the global --no-dry-run flag.
+      1. Ask whether to delete at all (skip if user says no).
+      2. Ask which file to keep per group (uniform strategy).
+      3. Preview every KEEP / DELETE decision.
+      4. Final confirmation before touching any file.
+
+    dry_run: shows the full flow but never removes files.
     """
     print()
     cprint(C.CYAN, "─" * 45)
-    cprint(C.CYAN, "  CLEANUP")
+    cprint(C.CYAN, f"  {title}")
     cprint(C.CYAN, "─" * 45)
     print()
 
-    # Step 1: delete or not
-    delete_ch = prompt_choice("  Do you want to delete the redundant ROMs?", {
-        "y": f"{C.RED}Yes{C.RESET} — delete extras, keep one per group",
-        "n": f"{C.GREEN}No{C.RESET}  — keep the report, do nothing",
+    delete_ch = prompt_choice("  Delete the extras?", {
+        "y": f"{C.RED}Yes{C.RESET} — keep one per group, delete the rest",
+        "n": f"{C.GREEN}No{C.RESET}  — leave everything in place",
     })
     if delete_ch == "n":
         cprint(C.GRAY, "  No files were changed.")
         return
     print()
 
-    # Step 2: which file to keep
-    strat_ch = prompt_choice("  Which file to keep from each duplicate group?", {
+    strat_ch = prompt_choice("  Which file to keep from each group?", {
         k: f"{C.CYAN}{label}{C.RESET}" for k, (label, _) in _KEEP_STRATEGIES.items()
     })
-    _, sort_key = _KEEP_STRATEGIES[strat_ch]
-    strategy_label = _KEEP_STRATEGIES[strat_ch][0]
+    sort_key, strategy_label = _KEEP_STRATEGIES[strat_ch][1], _KEEP_STRATEGIES[strat_ch][0]
     print()
 
-    # Step 3: build the plan and preview it
-    plan: list[tuple[Path, list[Path]]] = []  # (keep, [to_delete, ...])
-    for group in confirmed:
+    plan: list[tuple[Path, list[Path]]] = []
+    for group in groups:
         ordered = sorted(group, key=sort_key)
-        keep    = ordered[0][0]
-        to_del  = [t[0] for t in ordered[1:]]
-        plan.append((keep, to_del))
+        plan.append((ordered[0], ordered[1:]))
 
     n_to_delete = sum(len(d) for _, d in plan)
     cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
@@ -2678,7 +2688,6 @@ def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     cprint(C.YELLOW, f"  {n_to_delete} file(s) will be permanently deleted.")
     print()
 
-    # Step 4: final confirmation
     confirm_ch = prompt_choice("  Proceed?", {
         "y": f"{C.RED}Yes, delete now{C.RESET}",
         "n": f"{C.GREEN}No, cancel{C.RESET}",
@@ -2687,7 +2696,6 @@ def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
         cprint(C.GRAY, "  Cancelled — no files were changed.")
         return
 
-    # Execute
     print()
     if dry_run:
         cprint(C.MAGENTA, "  [DRY RUN] No files were changed.")
@@ -2708,6 +2716,560 @@ def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     print()
     cprint(C.CYAN, f"  Done — {deleted} file(s) deleted.")
     print()
+
+# =============================================================================
+# ROM COMPLETENESS CHECKER
+# Verifies a ROM folder against a No-Intro Logiqx XML DAT file.
+#
+# Completely independent of check_duplicates and _hash_file.
+# The two features are intentionally kept separate because they compute CRC32
+# for different purposes:
+#   - check_duplicates: compare ROMs *against each other* → _hash_file (SMC offset)
+#   - check_completeness: compare ROMs against *absolute DAT CRCs* → _dat_crc32
+# Mixing these code paths would silently corrupt both features.
+# =============================================================================
+
+# Extensions supported for DAT CRC matching.  Intentionally narrower than
+# ROM_EXTENSIONS: completeness checking is scoped to cartridge systems only.
+# Disc-based systems require multi-file verification (cue+bin, TOC, etc.)
+# which is out of scope for this feature.
+_DAT_ROM_EXTENSIONS: frozenset[str] = frozenset({
+    ".nes", ".fds",        # NES / Famicom Disk System
+    ".sfc", ".smc",        # SNES (headerless / headered)
+    ".gb", ".gbc", ".gba", # Game Boy / Color / Advance
+    ".gg",                 # Sega Game Gear
+    ".sms",                # Sega Master System
+    ".md", ".smd", ".gen", # Sega Mega Drive / Genesis (raw / SMD interleaved)
+})
+
+# No-Intro retail filter — exclude pre-release, unlicensed, hacks, bad dumps.
+# Covers the modern No-Intro parenthesized convention and the older GoodTools
+# bracket convention still present in some community-maintained DAT files.
+_DAT_RETAIL_PAREN_RE: re.Pattern = re.compile(
+    r'\((?:Beta(?:[- ]\d+)?|Proto(?:type)?|Alpha|Demo|Sample|Unl|Unlicensed|Hack)\)',
+    re.IGNORECASE,
+)
+_DAT_RETAIL_BRACKET_RE: re.Pattern = re.compile(
+    r'\[(?:b\d*|h[^\]]*|t\d*|p\d*|o\d*)\]',
+    re.IGNORECASE,
+)
+
+# Human-readable labels for the completeness report header.
+_COMPLETENESS_REGION_LABELS: dict[str, str] = {
+    "usa":             "USA / North America  (1G1R)",
+    "europe":          "Europe  (1G1R)",
+    "japan":           "Japan  (1G1R)",
+    "japan_exclusive": "Japan exclusives  (never released in USA / Europe / World)",
+    "all":             "All regions  (no 1G1R — full set)",
+}
+
+# SMD de-interleaving constants.
+_SMD_BLOCK_SIZE: int = 16_384   # 16 KB per interleaved block
+_SMD_HALF_SIZE:  int = _SMD_BLOCK_SIZE // 2   # 8 KB per half
+
+
+@dataclasses.dataclass(frozen=True)
+class DatGame:
+    """One cartridge entry from a No-Intro Logiqx XML DAT file.
+
+    Attributes:
+        name:     Full DAT name, e.g. "Super Mario World (USA)".
+        crc32:    Uppercase 8-char zero-padded hex CRC32, e.g. "B19ED489".
+        clone_of: "" if this entry is a parent; parent name if it is a clone.
+    """
+    name:     str
+    crc32:    str
+    clone_of: str
+
+
+# ---------------------------------------------------------------------------
+# Retail filter
+# ---------------------------------------------------------------------------
+def _is_retail(name: str) -> bool:
+    """Return True if game name passes the retail filter.
+
+    Rejects Beta, Proto(type), Alpha, Demo, Sample, Unlicensed (Unl), Hack
+    parenthesized tags and GoodTools bad-dump [b], hack [h*], trainer [t],
+    pirated [p], overdump [o] bracket tags.
+    """
+    return (
+        not _DAT_RETAIL_PAREN_RE.search(name)
+        and not _DAT_RETAIL_BRACKET_RE.search(name)
+    )
+
+
+# ---------------------------------------------------------------------------
+# SMD de-interleaving
+# ---------------------------------------------------------------------------
+# Sega Super Magic Drive (SMD) format stores ROM data in interleaved 16 KB blocks.
+# For each 16 KB block the first 8 KB are the odd-addressed bytes of the raw ROM
+# data and the second 8 KB are the even-addressed bytes.  No-Intro Genesis CRCs
+# are computed on the raw (non-interleaved) binary, so the interleaving must be
+# reversed before hashing.
+#
+# This is the only format in scope that requires byte-reordering rather than a
+# simple prefix skip.  De-interleaving is done in memory because Genesis ROMs
+# are bounded (practical maximum ~4 MB), making memory cost acceptable.
+# ---------------------------------------------------------------------------
+def _smd_deinterleave(data: bytes) -> bytes:
+    """Convert SMD-interleaved bytes to raw Mega Drive ROM bytes.
+
+    For each 16 KB block:
+      first 8 KB  → odd-addressed bytes of the original ROM
+      second 8 KB → even-addressed bytes of the original ROM
+
+    Uses bytearray extended-slice assignment for O(n) throughput without
+    element-wise Python loops.  Works correctly on partial final blocks.
+    """
+    if not data:
+        return b""
+    result = bytearray(len(data))
+    for block_start in range(0, len(data), _SMD_BLOCK_SIZE):
+        block = data[block_start : block_start + _SMD_BLOCK_SIZE]
+        blen  = len(block)
+        half  = blen // 2
+        if half == 0:
+            result[block_start] = block[0]
+            continue
+        # block[:half]  = odd-addressed bytes  → odd  positions in output
+        # block[half:]  = even-addressed bytes → even positions in output
+        result[block_start     : block_start + blen : 2] = block[half:]   # even pos
+        result[block_start + 1 : block_start + blen : 2] = block[:half]   # odd  pos
+    return bytes(result)
+
+
+# ---------------------------------------------------------------------------
+# DAT-matchable CRC32 computation
+# CRITICAL: Used ONLY by check_completeness.  check_duplicates uses _hash_file
+#           with _smc_header_offset exclusively and must never call this.
+# ---------------------------------------------------------------------------
+def _dat_read_magic(path: Path, n: int) -> bytes | None:
+    """Read the first n bytes of path for magic-byte detection.  None on error."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return None
+
+
+def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
+    """Return the No-Intro DAT-matchable CRC32 for a ROM file, or None on error.
+
+    Header/format handling (by extension):
+      .nes        — strips 16-byte iNES header.  If flags6 bit 2 is set, also
+                    strips the 512-byte trainer that follows the header.
+      .fds        — strips 16-byte fwNES header when magic b"FDS\\x1a" is present.
+      .smc / .sfc — strips 512-byte SMC copier header when size % 1024 == 512.
+      .smd        — strips 512-byte SMD header then de-interleaves 16 KB blocks.
+      all others  — raw CRC32 from byte 0 (no transformation).
+
+    Returns uppercase 8-char zero-padded hex (e.g. "B19ED489"), or None on error.
+    """
+    try:
+        ext = path.suffix.lower()
+
+        # ── .smd — must de-interleave, so load whole file into memory ───────
+        # Genesis / Mega Drive ROMs are bounded (practical max ~4 MB).
+        if ext == ".smd":
+            raw = path.read_bytes()
+            # SMD header detection: bytes 8–9 must be 0xAA 0xBB.
+            # Files with .smd extension but without this marker are treated as
+            # raw binary (some dumpers write plain .smd without interleaving).
+            if len(raw) >= 512 and len(raw) >= 10 and raw[8] == 0xAA and raw[9] == 0xBB:
+                payload = _smd_deinterleave(raw[512:])
+            else:
+                payload = raw
+            return f"{zlib.crc32(payload) & 0xFFFFFFFF:08X}"
+
+        # ── All other formats: determine byte offset, then stream ────────────
+        offset = 0
+
+        if ext == ".nes":
+            # iNES magic: b"NES\x1a" at offset 0.  Flags byte at offset 6.
+            hdr = _dat_read_magic(path, 16)
+            if hdr and len(hdr) >= 8 and hdr[:4] == b"NES\x1a":
+                trainer = bool(hdr[6] & 0x04)
+                offset = 16 + (512 if trainer else 0)
+
+        elif ext == ".fds":
+            # fwNES header: magic b"FDS\x1a" at offset 0, 16 bytes total.
+            hdr = _dat_read_magic(path, 4)
+            if hdr and hdr[:4] == b"FDS\x1a":
+                offset = 16
+
+        elif ext in (".smc", ".sfc"):
+            # SMC copier header: present when size % 1024 == 512 and size > 512.
+            size = path.stat().st_size
+            if size > 512 and size % 1024 == 512:
+                offset = 512
+
+        # Stream the file, skipping 'offset' leading bytes.
+        crc = 0
+        with open(path, "rb") as f:
+            if offset:
+                f.seek(offset)
+            while chunk := f.read(chunk_size):
+                crc = zlib.crc32(chunk, crc)
+        return f"{crc & 0xFFFFFFFF:08X}"
+
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Logiqx XML DAT parser
+# ---------------------------------------------------------------------------
+def parse_dat(dat_path: Path) -> list[DatGame]:
+    """Parse a No-Intro Logiqx XML DAT file and return a list of DatGame entries.
+
+    Accepts the standard Logiqx schema using <game> or <machine> elements:
+
+        <datafile>
+          <game name="Super Mario World (USA)" [cloneOf="..."]>
+            <rom name="..." crc="b19ed489" .../>
+          </game>
+        </datafile>
+
+    Raises:
+        FileNotFoundError   — dat_path does not exist.
+        xml.etree.ElementTree.ParseError — malformed XML.
+        ValueError          — file is not a Logiqx DAT (wrong root element).
+    """
+    tree = ET.parse(dat_path)
+    root = tree.getroot()
+
+    # Logiqx root must be <datafile> (case-insensitive in some community DATs).
+    if root.tag.lower() != "datafile":
+        raise ValueError(
+            f"Not a Logiqx XML DAT (expected <datafile> root, found <{root.tag}>).\n"
+            "Only No-Intro Logiqx XML format is supported.\n"
+            "Download DAT files from https://dat-o-matic.no-intro.org"
+        )
+
+    games: list[DatGame] = []
+    for elem in root:
+        if elem.tag not in ("game", "machine"):
+            continue
+
+        game_name = (elem.get("name") or "").strip()
+        clone_of  = (elem.get("cloneOf") or "").strip()
+        if not game_name:
+            continue
+
+        # Take the first <rom> child with a valid crc attribute.
+        crc = ""
+        for rom_elem in elem:
+            if rom_elem.tag != "rom":
+                continue
+            raw_crc = (rom_elem.get("crc") or "").strip()
+            if not raw_crc:
+                continue
+            try:
+                crc = f"{int(raw_crc, 16):08X}"   # normalise to uppercase 8-char hex
+            except ValueError:
+                continue   # malformed CRC — try the next <rom> element
+            break          # first valid CRC wins
+
+        if crc:
+            games.append(DatGame(name=game_name, crc32=crc, clone_of=clone_of))
+
+    return games
+
+
+# ---------------------------------------------------------------------------
+# 1G1R selection and region filtering
+# ---------------------------------------------------------------------------
+def _build_parent_groups(games: list[DatGame]) -> dict[str, list[DatGame]]:
+    """Group DatGames by their parent entry.  Returns {parent_key: [members]}.
+
+    The group key is:
+      game.clone_of  — if the game is a clone (clone_of != "")
+      game.name      — if the game is a parent (clone_of == "")
+
+    Orphan clones (clone_of points to a parent absent from the retail-filtered
+    list, e.g. the parent was a prototype) form their own single-member group
+    under their own name — they are still valid retail titles.
+    """
+    groups: dict[str, list[DatGame]] = defaultdict(list)
+    for game in games:
+        key = game.clone_of if game.clone_of else game.name
+        groups[key].append(game)
+    return dict(groups)
+
+
+def _pick_best_in_group(group: list[DatGame],
+                        region_priority: list[str]) -> DatGame:
+    """Select the single best DatGame from a parent group.
+
+    Rank is the index of the game's region in region_priority (0 = best).
+    Games whose region is not in region_priority or is unrecognised rank last.
+    Iteration order is preserved as a tiebreaker — the parent entry (always
+    appended first when building groups from an ordered parse) wins over
+    its clones at equal priority.
+    """
+    priority_index: dict[str, int] = {r: i for i, r in enumerate(region_priority)}
+    sentinel = len(region_priority)
+
+    def _rank(game: DatGame) -> int:
+        r = region_of(game.name)    # reuse the existing region_of() function
+        return priority_index.get(r, sentinel) if r else sentinel
+
+    return min(group, key=_rank)
+
+
+# Per-mode configuration: which regions include a group, which exclude it,
+# and the 1G1R priority list.  Defined at module level to avoid
+# reconstructing dicts on every call.
+_MODE_INCLUDE: dict[str, set[str]] = {
+    "usa":             {"usa", "world"},
+    "europe":          {"europe", "world"},
+    "japan":           {"japan", "world"},
+    "japan_exclusive": {"japan"},
+}
+_MODE_EXCLUDE: dict[str, set[str]] = {
+    "usa":             set(),
+    "europe":          set(),
+    "japan":           set(),
+    "japan_exclusive": {"usa", "europe", "world"},
+}
+_MODE_PRIORITY: dict[str, list[str]] = {
+    "usa":             ["usa", "world", "europe", "japan"],
+    "europe":          ["europe", "world", "usa", "japan"],
+    "japan":           ["japan", "world"],
+    "japan_exclusive": ["japan"],
+}
+
+
+def _filter_and_select(
+    games: list[DatGame],
+    region_mode: str,
+) -> list[DatGame]:
+    """Apply retail filter, then select entries according to region_mode.
+
+    region_mode values:
+      "usa"             — 1G1R: groups with a USA or World release; prefer USA > WORLD
+      "europe"          — 1G1R: groups with a EUR or World release; prefer EUR > WORLD
+      "japan"           — 1G1R: groups with a JPN or World release; prefer JPN > WORLD
+      "japan_exclusive" — groups where NO member has a USA / EUR / World release
+      "all"             — all retail entries, no 1G1R
+
+    Step 1: apply retail filter to every individual entry.
+    Step 2 (1G1R modes): group by parent, discard ineligible groups, pick best.
+    Step 2 (all mode):   return all retail entries as-is.
+    """
+    retail = [g for g in games if _is_retail(g.name)]
+
+    if region_mode == "all":
+        return retail
+
+    include_any = _MODE_INCLUDE[region_mode]
+    exclude_any = _MODE_EXCLUDE[region_mode]
+    priority    = _MODE_PRIORITY[region_mode]
+
+    result: list[DatGame] = []
+    for group in _build_parent_groups(retail).values():
+        group_regions: set[str | None] = {region_of(g.name) for g in group}
+
+        # japan_exclusive: reject groups that contain any USA/EUR/World release.
+        if exclude_any and group_regions & exclude_any:
+            continue
+
+        # Require at least one member from an included region.
+        if not (group_regions & include_any):
+            continue
+
+        result.append(_pick_best_in_group(group, priority))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Completeness checker — main entry point
+# ---------------------------------------------------------------------------
+def check_completeness(
+    dat_path:    Path,
+    rom_dir:     Path,
+    region_mode: str,
+    script_dir:  Path,
+    want_list:   bool = False,
+) -> None:
+    """Check a ROM folder against a No-Intro Logiqx XML DAT file.
+
+    Produces a timestamped CSV report (FOUND / MISSING / UNUSED) next to the
+    script and prints a summary to the terminal.  If want_list=True, also
+    writes a plain-text list of MISSING titles.
+
+    region_mode: "usa" | "europe" | "japan" | "japan_exclusive" | "all"
+
+    This function is entirely independent of check_duplicates.  It never calls
+    _hash_file or _smc_header_offset; all ROM reading goes through _dat_crc32.
+    """
+    print()
+    cprint(C.CYAN, "=============================================")
+    cprint(C.CYAN, "  ROM COMPLETENESS CHECK")
+    cprint(C.CYAN, "=============================================")
+    print()
+
+    # ── Parse DAT ────────────────────────────────────────────────────────────
+    cprint(C.GRAY, f"  Parsing DAT: {dat_path.name}")
+    try:
+        all_games = parse_dat(dat_path)
+    except FileNotFoundError:
+        cprint(C.DRED, f"  ERROR: DAT file not found: {dat_path}")
+        sys.exit(1)
+    except ET.ParseError as exc:
+        cprint(C.DRED, f"  ERROR: Malformed XML in DAT file: {exc}")
+        sys.exit(1)
+    except ValueError as exc:
+        cprint(C.DRED, f"  ERROR: {exc}")
+        sys.exit(1)
+
+    if not all_games:
+        cprint(C.YELLOW, "  No games found in DAT file — check the file format.")
+        return
+
+    cprint(C.GRAY, f"    {len(all_games)} entries in DAT (before filtering)")
+
+    # ── Apply retail filter + region mode ────────────────────────────────────
+    target_games = _filter_and_select(all_games, region_mode)
+    if not target_games:
+        cprint(C.YELLOW,
+               f"  No games matched region mode '{region_mode}' after filtering.")
+        return
+
+    region_label = _COMPLETENESS_REGION_LABELS.get(region_mode, region_mode)
+    cprint(C.GRAY,
+           f"    {len(target_games)} target entries after retail filter "
+           f"and region selection")
+    cprint(C.GRAY, f"    Mode: {region_label}")
+    print()
+
+    # Build the primary lookup: crc32 → DatGame.
+    # Duplicate CRCs in the DAT (should not happen, but be defensive) keep last.
+    dat_by_crc: dict[str, DatGame] = {g.crc32: g for g in target_games}
+
+    # ── Scan ROM folder ──────────────────────────────────────────────────────
+    if not rom_dir.is_dir():
+        cprint(C.DRED, f"  ERROR: ROM folder not found: {rom_dir}")
+        sys.exit(1)
+
+    rom_files: list[Path] = sorted(
+        p for p in rom_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in _DAT_ROM_EXTENSIONS
+    )
+    cprint(C.GRAY, f"  Scanning {len(rom_files)} ROM file(s) in: {rom_dir}")
+    print()
+
+    # ── Hash ROM files and match against DAT ─────────────────────────────────
+    found:   list[tuple[DatGame, Path]] = []   # (dat_entry, rom_path)
+    unused:  list[Path]                  = []   # ROM with no DAT match
+    unread:  list[Path]                  = []   # ROM that could not be hashed
+    matched_crcs: set[str]               = set()
+
+    n_total = len(rom_files)
+    for i, rom_path in enumerate(rom_files, 1):
+        print(progress_bar(i, n_total, label="Hashing   "), end="", flush=True)
+        crc = _dat_crc32(rom_path)
+        if crc is None:
+            unread.append(rom_path)
+        elif crc in dat_by_crc:
+            found.append((dat_by_crc[crc], rom_path))
+            matched_crcs.add(crc)
+        else:
+            unused.append(rom_path)
+    print()   # newline after progress bar
+
+    # ── Determine MISSING (DAT entries with no matched ROM) ──────────────────
+    missing: list[DatGame] = [g for g in target_games if g.crc32 not in matched_crcs]
+
+    # ── Report ───────────────────────────────────────────────────────────────
+    _report_completeness(
+        found         = found,
+        missing       = missing,
+        unused        = unused,
+        unread        = unread,
+        region_mode   = region_mode,
+        dat_path      = dat_path,
+        rom_dir       = rom_dir,
+        target_total  = len(target_games),
+        script_dir    = script_dir,
+        want_list     = want_list,
+    )
+
+
+def _report_completeness(
+    found:        list[tuple[DatGame, Path]],
+    missing:      list[DatGame],
+    unused:       list[Path],
+    unread:       list[Path],
+    region_mode:  str,
+    dat_path:     Path,
+    rom_dir:      Path,
+    target_total: int,
+    script_dir:   Path,
+    want_list:    bool,
+) -> None:
+    """Write CSV report + optional want-list, then print a terminal summary."""
+    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = script_dir / f"completeness_{ts}.csv"
+    wl_path: Path | None = (
+        script_dir / f"wantlist_{ts}.txt" if want_list else None
+    )
+
+    # ── CSV ──────────────────────────────────────────────────────────────────
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["Status", "Game Name", "Region", "Your File"])
+
+        for dat_game, rom_path in sorted(found, key=lambda t: t[0].name.lower()):
+            r = region_of(dat_game.name) or ""
+            writer.writerow(["FOUND", dat_game.name, r, rom_path.name])
+
+        for dat_game in sorted(missing, key=lambda g: g.name.lower()):
+            r = region_of(dat_game.name) or ""
+            writer.writerow(["MISSING", dat_game.name, r, ""])
+
+        for rom_path in sorted(unused, key=lambda p: p.name.lower()):
+            writer.writerow(["UNUSED", "", "", rom_path.name])
+
+    # ── Want-list ─────────────────────────────────────────────────────────────
+    if wl_path is not None and missing:
+        with open(wl_path, "w", encoding="utf-8") as fh:
+            fh.write(f"# Missing ROMs — {dat_path.name}\n")
+            fh.write(f"# Mode: {_COMPLETENESS_REGION_LABELS.get(region_mode, region_mode)}\n")
+            fh.write(f"# Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
+            for game in sorted(missing, key=lambda g: g.name.lower()):
+                fh.write(f"{game.name}\n")
+
+    # ── Terminal summary ─────────────────────────────────────────────────────
+    n_found   = len(found)
+    n_missing = len(missing)
+    n_unused  = len(unused)
+    n_unread  = len(unread)
+    pct       = (n_found / target_total * 100) if target_total else 0.0
+
+    print()
+    cprint(C.CYAN, "=============================================")
+    cprint(C.CYAN, "  COMPLETENESS REPORT")
+    cprint(C.CYAN, f"  DAT  : {dat_path.name}")
+    cprint(C.CYAN, f"  ROMs : {rom_dir}")
+    cprint(C.CYAN, f"  Mode : {_COMPLETENESS_REGION_LABELS.get(region_mode, region_mode)}")
+    cprint(C.CYAN, "=============================================")
+    cprint(C.GREEN,  f"  Found   : {n_found:>5} / {target_total}  ({pct:.1f}%)")
+    cprint(C.DRED,   f"  Missing : {n_missing:>5}")
+    cprint(C.YELLOW, f"  Unused  : {n_unused:>5}  (no DAT match — ROM hack / bad dump?)")
+    if n_unread:
+        cprint(C.YELLOW, f"  Unread  : {n_unread:>5}  (could not hash)")
+    cprint(C.CYAN, "=============================================")
+    print()
+    cprint(C.GREEN, f"  CSV saved to : {csv_path}")
+    if wl_path is not None:
+        if missing:
+            cprint(C.GREEN, f"  Want-list    : {wl_path}")
+        else:
+            cprint(C.GRAY,  "  (no want-list written — collection is complete!)")
+    print()
+
 
 def _detect_systems(roms_base: Path, system_arg: str,
                     rom_ext_filter: set[str] | None = None) -> tuple[list[str], bool]:
@@ -3466,6 +4028,20 @@ def main() -> None:
                              "passing secrets on the CLI exposes them in process lists and shell history).")
     parser.add_argument("--check-duplicates", action="store_true",
                         help="Scan ROMs for duplicates (runs instead of cover sync)")
+    parser.add_argument("--check-completeness", action="store_true",
+                        help="Check ROM folder against a No-Intro Logiqx XML DAT file")
+    parser.add_argument("--dat",               default="",
+                        help="Path to No-Intro Logiqx XML DAT file "
+                             "(required with --check-completeness)")
+    parser.add_argument("--completeness-region", default="usa",
+                        choices=["usa", "europe", "japan", "japan_exclusive", "all"],
+                        help="Region mode for completeness check (default: usa). "
+                             "usa/europe/japan apply a 1G1R filter. "
+                             "japan_exclusive selects games never released in USA/Europe/World. "
+                             "all returns every retail entry with no 1G1R.")
+    parser.add_argument("--want-list",         action="store_true",
+                        help="Save a plain-text list of MISSING titles alongside the CSV "
+                             "(used with --check-completeness)")
 
     parser.add_argument("--threshold",        type=float, default=0.4,
                         help="Fuzzy match threshold 0.0-1.0 (default 0.4)")
@@ -3501,7 +4077,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Wizard mode: no substantive args provided
     # ------------------------------------------------------------------
-    wizard_mode = not args.roms and not args.covers and not args.backgrounds and not args.check_duplicates
+    wizard_mode = (
+        not args.roms
+        and not args.covers
+        and not args.backgrounds
+        and not args.check_duplicates
+        and not args.check_completeness
+    )
 
     if wizard_mode:
         _wizard(dry_run, magick, token, args, script_dir, script_stem)
@@ -3523,6 +4105,35 @@ def main() -> None:
             common = [prompt_system()]
         check_duplicates(roms_base, common, single_system, args.parallel_jobs,
                          dry_run=dry_run)
+        sys.exit(0)
+
+    if args.check_completeness:
+        dat_raw = (args.dat or "").strip().strip('"')
+        if not dat_raw:
+            cprint(C.RED,  "  --dat is required with --check-completeness.")
+            cprint(C.GRAY, "  Example: --dat '/path/to/Nintendo - SNES.dat'")
+            cprint(C.GRAY, "  Download DAT files from: https://dat-o-matic.no-intro.org")
+            sys.exit(1)
+        dat_path = Path(dat_raw)
+        if not dat_path.is_file():
+            cprint(C.RED, f"  DAT file not found: '{dat_path}'")
+            sys.exit(1)
+
+        roms_raw_c = (args.roms or "").strip().strip('"')
+        if not roms_raw_c:
+            roms_raw_c = prompt_path("ROM folder to check")
+        rom_dir = Path(roms_raw_c)
+        if not rom_dir.is_dir():
+            cprint(C.RED, f"  ROM folder not found: '{rom_dir}'")
+            sys.exit(1)
+
+        check_completeness(
+            dat_path    = dat_path,
+            rom_dir     = rom_dir,
+            region_mode = args.completeness_region,
+            script_dir  = script_dir,
+            want_list   = args.want_list,
+        )
         sys.exit(0)
 
     # Resolve required paths
@@ -3823,6 +4434,318 @@ class TestNormFolder(unittest.TestCase):
         self.assertEqual(_norm_folder("  snes  "), "snes")
 
 
+class TestIsRetail(unittest.TestCase):
+    """_is_retail — retail filter for DAT entries."""
+
+    def test_clean_game_passes(self):
+        self.assertTrue(_is_retail("Super Mario World (USA)"))
+
+    def test_beta_filtered(self):
+        self.assertFalse(_is_retail("Game (Beta)"))
+
+    def test_beta_with_number_filtered(self):
+        self.assertFalse(_is_retail("Game (Beta 2)"))
+
+    def test_proto_filtered(self):
+        self.assertFalse(_is_retail("Game (Proto)"))
+
+    def test_prototype_filtered(self):
+        self.assertFalse(_is_retail("Game (Prototype)"))
+
+    def test_demo_filtered(self):
+        self.assertFalse(_is_retail("Game (Demo)"))
+
+    def test_sample_filtered(self):
+        self.assertFalse(_is_retail("Game (Sample)"))
+
+    def test_unl_filtered(self):
+        self.assertFalse(_is_retail("Game (Unl)"))
+
+    def test_unlicensed_filtered(self):
+        self.assertFalse(_is_retail("Game (Unlicensed)"))
+
+    def test_bad_dump_filtered(self):
+        self.assertFalse(_is_retail("Game [b]"))
+
+    def test_hack_bracket_filtered(self):
+        self.assertFalse(_is_retail("Game [h C]"))
+
+    def test_trainer_filtered(self):
+        self.assertFalse(_is_retail("Game [t1]"))
+
+    def test_case_insensitive(self):
+        self.assertFalse(_is_retail("Game (BETA)"))
+
+
+class TestSmdDeinterleave(unittest.TestCase):
+    """_smd_deinterleave — SMD byte de-interleaving."""
+
+    def test_empty_input(self):
+        self.assertEqual(_smd_deinterleave(b""), b"")
+
+    def test_known_pattern_single_block(self):
+        """Round-trip verification on one full 16 KB block."""
+        half = _SMD_HALF_SIZE
+        # Original ROM bytes: even positions = 0xAA, odd positions = 0xBB
+        rom_original = bytes([0xAA if i % 2 == 0 else 0xBB
+                               for i in range(_SMD_BLOCK_SIZE)])
+        # SMD layout: first half = odd-addressed bytes, second half = even-addressed
+        odd_half  = bytes([0xBB] * half)
+        even_half = bytes([0xAA] * half)
+        smd_input = odd_half + even_half
+
+        self.assertEqual(_smd_deinterleave(smd_input), rom_original)
+
+    def test_partial_block(self):
+        """Partial final block is handled without crashing or truncating."""
+        # 8 bytes: first 4 = odd half, last 4 = even half
+        smd_input = bytes([0xBB, 0xBB, 0xBB, 0xBB, 0xAA, 0xAA, 0xAA, 0xAA])
+        expected  = bytes([0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB])
+        self.assertEqual(_smd_deinterleave(smd_input), expected)
+
+    def test_output_length_equals_input_length(self):
+        data = bytes(range(256)) * 64   # 16 KB
+        self.assertEqual(len(_smd_deinterleave(data)), len(data))
+
+
+class TestParseDat(unittest.TestCase):
+    """parse_dat — Logiqx XML parsing."""
+
+    _SAMPLE_DAT = """\
+<?xml version="1.0"?>
+<datafile>
+    <game name="Super Mario World (USA)">
+        <rom name="Super Mario World (USA).sfc" size="524288" crc="b19ed489"/>
+    </game>
+    <game name="Super Mario World (Europe)" cloneOf="Super Mario World (USA)">
+        <rom name="Super Mario World (Europe).sfc" size="524288" crc="6810aa95"/>
+    </game>
+    <game name="Alpha Game (Beta)">
+        <rom name="Alpha Game (Beta).sfc" size="1024" crc="deadbeef"/>
+    </game>
+</datafile>
+"""
+
+    def _write_dat(self, content: str) -> Path:
+        fd, fname = tempfile.mkstemp(suffix=".dat")
+        try:
+            os.write(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return Path(fname)
+
+    def test_parse_count(self):
+        p = self._write_dat(self._SAMPLE_DAT)
+        try:
+            games = parse_dat(p)
+            self.assertEqual(len(games), 3)
+        finally:
+            p.unlink()
+
+    def test_crc_normalised_to_uppercase_8char(self):
+        p = self._write_dat(self._SAMPLE_DAT)
+        try:
+            games = parse_dat(p)
+            crcs = {g.crc32 for g in games}
+            self.assertIn("B19ED489", crcs)
+            self.assertIn("6810AA95", crcs)
+            self.assertIn("DEADBEEF", crcs)
+        finally:
+            p.unlink()
+
+    def test_clone_of_set_on_clone(self):
+        p = self._write_dat(self._SAMPLE_DAT)
+        try:
+            games = parse_dat(p)
+            clone = next(g for g in games if "Europe" in g.name)
+            self.assertEqual(clone.clone_of, "Super Mario World (USA)")
+        finally:
+            p.unlink()
+
+    def test_parent_has_empty_clone_of(self):
+        p = self._write_dat(self._SAMPLE_DAT)
+        try:
+            games = parse_dat(p)
+            parent = next(g for g in games if "USA" in g.name)
+            self.assertEqual(parent.clone_of, "")
+        finally:
+            p.unlink()
+
+    def test_invalid_root_raises_value_error(self):
+        bad = '<?xml version="1.0"?><wrongroot><game name="x"><rom crc="00000000"/></game></wrongroot>'
+        p = self._write_dat(bad)
+        try:
+            with self.assertRaises(ValueError):
+                parse_dat(p)
+        finally:
+            p.unlink()
+
+
+class TestFilterAndSelect(unittest.TestCase):
+    """_filter_and_select — retail filter + 1G1R region mode logic."""
+
+    def _make_games(self) -> list[DatGame]:
+        return [
+            # Japan-exclusive: no USA/EUR/WORLD counterpart
+            DatGame("Twinkle Tale (Japan)",  "AAAAAAAA", ""),
+            # Multi-region parent group
+            DatGame("Super Game (USA)",      "BBBBBBBB", ""),
+            DatGame("Super Game (Europe)",   "CCCCCCCC", "Super Game (USA)"),
+            DatGame("Super Game (Japan)",    "DDDDDDDD", "Super Game (USA)"),
+            # World release (standalone parent)
+            DatGame("World Game (World)",    "EEEEEEEE", ""),
+            # Pre-release — must be filtered out
+            DatGame("Bad Game (Beta)",       "FFFFFFFF", ""),
+        ]
+
+    def test_all_mode_keeps_every_retail_entry(self):
+        result = _filter_and_select(self._make_games(), "all")
+        names = [g.name for g in result]
+        self.assertEqual(len(result), 5)           # Beta entry removed
+        self.assertNotIn("Bad Game (Beta)", names)
+
+    def test_usa_mode_picks_usa_from_group(self):
+        result = _filter_and_select(self._make_games(), "usa")
+        names = {g.name for g in result}
+        self.assertIn("Super Game (USA)", names)
+        self.assertNotIn("Super Game (Europe)", names)
+        self.assertNotIn("Super Game (Japan)", names)
+
+    def test_usa_mode_includes_world(self):
+        result = _filter_and_select(self._make_games(), "usa")
+        names = {g.name for g in result}
+        self.assertIn("World Game (World)", names)
+
+    def test_usa_mode_excludes_japan_exclusive(self):
+        result = _filter_and_select(self._make_games(), "usa")
+        names = {g.name for g in result}
+        self.assertNotIn("Twinkle Tale (Japan)", names)
+
+    def test_europe_mode_picks_europe_from_group(self):
+        result = _filter_and_select(self._make_games(), "europe")
+        names = {g.name for g in result}
+        self.assertIn("Super Game (Europe)", names)
+        self.assertNotIn("Super Game (USA)", names)
+
+    def test_japan_exclusive_includes_only_japan_only(self):
+        result = _filter_and_select(self._make_games(), "japan_exclusive")
+        names = {g.name for g in result}
+        # Twinkle Tale has no USA/EUR/WORLD → included
+        self.assertIn("Twinkle Tale (Japan)", names)
+        # Super Game has USA member → disqualified entirely
+        self.assertNotIn("Super Game (Japan)", names)
+        # World Game has World member → disqualified
+        self.assertNotIn("World Game (World)", names)
+
+    def test_retail_filter_applied_before_grouping(self):
+        result = _filter_and_select(self._make_games(), "all")
+        self.assertFalse(any(g.name == "Bad Game (Beta)" for g in result))
+
+    def test_one_entry_per_group_in_1g1r_modes(self):
+        for mode in ("usa", "europe", "japan", "japan_exclusive"):
+            result = _filter_and_select(self._make_games(), mode)
+            # No entry should appear more than once
+            crcs = [g.crc32 for g in result]
+            self.assertEqual(len(crcs), len(set(crcs)), f"Duplicate CRCs in mode '{mode}'")
+
+
+class TestDatCrc32(unittest.TestCase):
+    """_dat_crc32 — header stripping and CRC computation."""
+
+    def _expected_crc(self, data: bytes) -> str:
+        return f"{zlib.crc32(data) & 0xFFFFFFFF:08X}"
+
+    def _write_temp(self, data: bytes, suffix: str) -> Path:
+        fd, fname = tempfile.mkstemp(suffix=suffix)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return Path(fname)
+
+    def test_nes_header_stripped(self):
+        header  = b"NES\x1a" + b"\x02\x01\x00\x00" + b"\x00" * 8   # 16 bytes, no trainer
+        payload = b"\xAB" * 1024
+        p = self._write_temp(header + payload, ".nes")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_nes_trainer_stripped(self):
+        flags6  = 0x04   # bit 2 set → 512-byte trainer present
+        header  = b"NES\x1a" + bytes([2, 1, flags6, 0]) + b"\x00" * 8
+        trainer = b"\x99" * 512
+        payload = b"\xAB" * 1024
+        p = self._write_temp(header + trainer + payload, ".nes")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_nes_no_magic_not_stripped(self):
+        payload = b"\xCD" * 512
+        p = self._write_temp(payload, ".nes")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_fds_header_stripped(self):
+        header  = b"FDS\x1a" + b"\x00" * 12   # 16 bytes
+        payload = b"\x55" * 512
+        p = self._write_temp(header + payload, ".fds")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_snes_smc_header_stripped(self):
+        # 512-byte copier header: total size = 512 + 512*1024; size % 1024 == 512
+        payload = b"\xBE" * (512 * 1024)
+        p = self._write_temp(b"\x00" * 512 + payload, ".smc")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_snes_clean_sfc_not_stripped(self):
+        payload = b"\xCA" * (512 * 1024)   # size % 1024 == 0 → no header
+        p = self._write_temp(payload, ".sfc")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_gba_no_transformation(self):
+        payload = b"\xDD" * 2048
+        p = self._write_temp(payload, ".gba")
+        try:
+            self.assertEqual(_dat_crc32(p), self._expected_crc(payload))
+        finally:
+            p.unlink()
+
+    def test_smd_deinterleaved_before_crc(self):
+        # Build a minimal 1-block SMD file (512-byte header + 16 KB data)
+        smd_header = b"\x00" * 8 + bytes([0xAA, 0xBB]) + b"\x00" * 502   # 512 bytes
+        # Original ROM: sequential bytes
+        half = _SMD_HALF_SIZE
+        rom_original = bytes(range(256)) * (half // 128)   # 8 KB
+        odd_half     = rom_original[1::2] + bytes(half - len(rom_original[1::2]))
+        even_half    = rom_original[0::2] + bytes(half - len(rom_original[0::2]))
+        # Actually build a proper full block: pair original with itself for simplicity
+        rom_full  = bytes(range(256)) * (_SMD_BLOCK_SIZE // 256)   # 16 KB
+        smd_block = rom_full[1::2] + rom_full[0::2]                # interleave
+        smd_file  = smd_header + smd_block
+        p = self._write_temp(smd_file, ".smd")
+        try:
+            result = _dat_crc32(p)
+            expected = self._expected_crc(_smd_deinterleave(smd_block))
+            self.assertEqual(result, expected)
+        finally:
+            p.unlink()
+
+
 def _run_tests() -> None:
     """Run the built-in unit-test suite and exit with an appropriate code."""
     import sys as _sys
@@ -3832,6 +4755,9 @@ def _run_tests() -> None:
         TestNormalize, TestSimilarity, TestRegionOf,
         TestProgressTracker, TestResolveSystemFolder,
         TestCounters, TestSMCHeaderOffset, TestNormFolder,
+        # Completeness checker
+        TestIsRetail, TestSmdDeinterleave, TestParseDat,
+        TestFilterAndSelect, TestDatCrc32,
     ):
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner  = unittest.TextTestRunner(verbosity=2)
