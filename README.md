@@ -76,6 +76,7 @@ python rom-assets-manager.py
 
 ```
 python rom-assets-manager.py [OPTIONS]
+python rom-assets-manager.py --help
 ```
 
 #### Core paths
