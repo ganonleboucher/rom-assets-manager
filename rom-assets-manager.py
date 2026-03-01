@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync-covers.py — Download and sync cover art & backgrounds to a ROM library.
+rom-assets-manager.py — Download and sync cover art & backgrounds to a ROM library.
 
 Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
 Sources: libretro-thumbnails (GitHub) · SteamGridDB · LaunchBox GamesDB
@@ -1023,7 +1023,7 @@ def _http_get(url: str, token: str | None, bearer: bool = False,
     """Fetch URL with retry on transient errors and optional Bearer/token auth.
     Retries on: connection errors, HTTP 429, HTTP 5xx.  Raises on 4xx.  Backoff: 2^attempt s.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "sync-covers-py"})
+    req = urllib.request.Request(url, headers={"User-Agent": "rom-assets-manager-py"})
     if token:
         req.add_header("Authorization", f"{'Bearer' if bearer else 'token'} {token}")
     last_exc: Exception | None = None
@@ -3427,7 +3427,7 @@ _SECTION = "  ──────────────────────
 def _wiz_banner(dry_run: bool) -> None:
     print()
     cprint(C.CYAN, "  ╔══════════════════════════════════════╗")
-    cprint(C.CYAN, "  ║         sync-covers  wizard          ║")
+    cprint(C.CYAN, "  ║         rom-assets-manager  wizard          ║")
     cprint(C.CYAN, "  ╚══════════════════════════════════════╝")
     print()
     if dry_run:
@@ -3746,7 +3746,7 @@ def _wizard(
         report_path = Path(report_arg)
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = script_dir / f"sync-covers_report_{ts}.txt"
+        report_path = script_dir / f"rom-assets-manager_report_{ts}.txt"
 
     # ── 12. Confirm ───────────────────────────────────────────────────
     task_label = {
@@ -3815,7 +3815,7 @@ def main() -> None:
     script_stem = script_path.stem
 
     parser = argparse.ArgumentParser(
-        prog="sync-covers.py",
+        prog="rom-assets-manager.py",
         description=(
             "Download and sync cover art & backgrounds to a ROM library.\n"
             "Run with no arguments to launch the interactive wizard.\n\n"
@@ -3882,7 +3882,7 @@ def main() -> None:
                         help="GitHub personal access token (prefer GITHUB_TOKEN env var — "
                              "passing secrets on the CLI exposes them in process lists and shell history).")
     parser.add_argument("--report",           default="",
-                        help="Report file path. Defaults to sync-covers_report_YYYYMMDD_HHMMSS.txt "
+                        help="Report file path. Defaults to rom-assets-manager_report_YYYYMMDD_HHMMSS.txt "
                              "next to the script. Pass 'none' to disable.")
     args = parser.parse_args()
 
@@ -4002,7 +4002,7 @@ def main() -> None:
 
     print()
     cprint(C.CYAN, "=============================================")
-    cprint(C.CYAN, "  sync-covers.py  (CLI mode)")
+    cprint(C.CYAN, "  rom-assets-manager.py  (CLI mode)")
     cprint(C.CYAN, f"  Platform    : {sys.platform}")
     cprint(C.CYAN, f"  Python      : {sys.version.split()[0]}")
     cprint(C.MAGENTA if dry_run else C.RED,
@@ -4035,7 +4035,7 @@ def main() -> None:
         report_path = Path(report_arg)
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = script_dir / f"sync-covers_report_{ts}.txt"
+        report_path = script_dir / f"rom-assets-manager_report_{ts}.txt"
 
     cfg = SyncConfig(
         dry_run          = dry_run,
