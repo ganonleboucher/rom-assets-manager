@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -903,14 +904,15 @@ def sgdb_get_logo_url(game_id: int, key: str) -> str | None:
 
 def lbdb_load_index(
     ttl_hours: int,
-    script_dir: Path,
     script_stem: str,
     timeout: int = 90,
 ) -> LbIndex:
     """Download + cache LaunchBox Metadata.zip; return in-memory index.
     Returns {} on any failure so callers degrade gracefully.
     """
-    cache_path = script_dir / f"{script_stem}_launchbox.json"
+    cache_dir = Path(tempfile.gettempdir()) / "rom-assets-manager"
+    cache_dir.mkdir(exist_ok=True)
+    cache_path = cache_dir / f"{script_stem}_launchbox.json"
 
     if cache_path.exists():
         try:
@@ -1058,14 +1060,16 @@ def _http_get(url: str, token: str | None, bearer: bool = False,
     raise last_exc  # type: ignore[misc]  # exhausted all retries
 
 def get_repo_file_list(repo: str, token: str | None,
-                       ttl_hours: int, script_dir: Path, script_stem: str,
+                       ttl_hours: int, script_stem: str,
                        folder_name: str = "Named_Boxarts") -> list[str]:
     """Fetch the file list for folder_name inside a libretro-thumbnails repo.
     Cache key includes folder_name so logos and boxarts stay separate.
     """
     # Encode folder_name in cache filename so logos and boxarts cache separately.
     folder_tag = "logos" if folder_name == "Named_Logos" else "boxarts"
-    cache_path = script_dir / f"{script_stem}_{repo}_{folder_tag}.json"
+    cache_dir = Path(tempfile.gettempdir()) / "rom-assets-manager"
+    cache_dir.mkdir(exist_ok=True)
+    cache_path = cache_dir / f"{script_stem}_{repo}_{folder_tag}.json"
 
     if cache_path.exists():
         try:
@@ -3297,7 +3301,6 @@ def _run_sync(
     common: list[str],
     single_system: bool,
     cache_ttl: int,
-    script_dir: Path,
     script_stem: str,
     report_path: Path | None,
 ) -> None:
@@ -3312,7 +3315,7 @@ def _run_sync(
     bg_orphans:   list[str] = []
 
     # Load LaunchBox offline index once; passed to all cover + bg workers.
-    lb_index = lbdb_load_index(cache_ttl, script_dir, script_stem)
+    lb_index = lbdb_load_index(cache_ttl, script_stem)
 
     # ----------------------------------------------------------------
     # Covers pass
@@ -3332,7 +3335,7 @@ def _run_sync(
                                        if cfg.cover_style == "game_logo"
                                        else "Named_Boxarts")
                     repo_files = get_repo_file_list(
-                        repo_name, cfg.github_token, cache_ttl, script_dir, script_stem,
+                        repo_name, cfg.github_token, cache_ttl, script_stem,
                         folder_name=libretro_folder,
                     )
 
@@ -3388,7 +3391,7 @@ def _run_sync(
                 if bg_repo_name:
                     bg_repo_files = get_repo_file_list(
                         bg_repo_name, cfg.github_token, cache_ttl,
-                        script_dir, script_stem,
+                        script_stem,
                         folder_name="Named_Boxarts",
                     )
             # Same guard: ensure bg_orphans accumulate regardless of per-folder errors.
@@ -3817,7 +3820,6 @@ def _wizard(
         common      = common,
         single_system = single_system,
         cache_ttl   = args.cache_ttl,
-        script_dir  = script_dir,
         script_stem = script_stem,
         report_path = report_path,
     )
@@ -4077,7 +4079,6 @@ def main() -> None:
         common      = common,
         single_system = single_system,
         cache_ttl   = args.cache_ttl,
-        script_dir  = script_dir,
         script_stem = script_stem,
         report_path = report_path,
     )
