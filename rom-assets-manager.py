@@ -6,9 +6,8 @@ Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
 Sources: libretro-thumbnails (GitHub) · SteamGridDB · LaunchBox GamesDB
 
 USAGE
-    python sync-covers.py                          # interactive wizard (first run)
-    python sync-covers.py --no-dry-run             # apply changes (dry-run by default)
-        --roms ~/retro/roms --covers ~/retro/covers
+    python sync-covers.py                  # interactive wizard (no args = wizard mode)
+    python sync-covers.py --no-dry-run ... # apply changes (default is a safe dry run)
 
 COVER STYLES  (--cover-style)
     with-logo     Box art + system logo [default]   libretro → LaunchBox
@@ -19,33 +18,30 @@ BACKGROUND STYLES  (--bg-style)
     fanart   Hero art at 1920×1080 [default]        SteamGridDB Heroes → LB Fanart
     boxart   Box art letterboxed to 1920×1080       libretro Named_Boxarts → LB Box-Front
 
-EXAMPLES
-    # Game logos + fanart backgrounds in one pass
-    python sync-covers.py --no-dry-run \
-        --roms ~/retro/roms --covers ~/retro/covers \
-        --backgrounds ~/retro/backgrounds \
-        --cover-style game-logo --sgdb-key YOUR_KEY
-
-    # European covers with orphan cleanup, single system
-    python sync-covers.py --no-dry-run --region europe --system snes \
-        --delete-orphans \
-        --roms ~/retro/roms/snes --covers ~/retro/covers/snes
-
-    # Windows (use ^ for line continuation)
-    python sync-covers.py --no-dry-run ^
-        --roms "E:/tico/roms" --covers "E:/tico/assets/covers" ^
-        --cover-style game-logo --sgdb-key YOUR_KEY
+OPTIONS
+    --roms PATH            Root folder containing ROM subfolders (or a single system folder)
+    --covers PATH          Output folder for cover art
+    --backgrounds PATH     Output folder for background art
+    --system NAME          Target a single system (e.g. snes, psx) instead of all subfolders
+    --no-dry-run           Actually write files; omit this flag to preview changes safely
+    --delete-orphans       Remove covers/backgrounds that have no matching ROM file
+    --download-mode MODE   missing (default) | all (re-download) | skip (rename only)
+    --cover-style STYLE    with-logo (default) | without-logo | game-logo
+    --bg-style STYLE       fanart (default) | boxart
+    --region REGION        Prefer a region: any (default) | usa | europe | japan | world
+    --check-duplicates     Scan ROMs for duplicates by CRC32+SHA-1 (skips cover sync)
+    --threshold FLOAT      Fuzzy-match sensitivity 0.0–1.0, lower = looser (default 0.4)
+    --parallel-jobs INT    Concurrent download workers (default 6)
+    --cache-ttl INT        GitHub API file-list cache lifetime in hours (default 24)
+    --http-timeout INT     Per-request HTTP timeout in seconds (default 30)
+    --github-token TOKEN   GitHub PAT — prefer env var GITHUB_TOKEN (raises limit 60→5000 req/h)
+    --sgdb-key KEY         SteamGridDB API key — prefer env var SGDB_KEY (free at steamgriddb.com)
+    --report PATH          Write a plain-text run report; pass none to disable
 
 DEPENDENCIES
     ImageMagick   Required for conversion and resizing.
                   Windows: winget install ImageMagick.Q16-HDRI
                   Linux:   sudo apt install imagemagick
-
-    GitHub token  Raises API limit from 60 → 5 000 req/h.
-                  export GITHUB_TOKEN=ghp_xxxx  or  --github-token ghp_xxxx
-
-    SGDB key      Free at https://www.steamgriddb.com/profile/preferences
-                  export SGDB_KEY=YOUR_KEY  or  --sgdb-key YOUR_KEY
 """
 
 
@@ -54,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import getpass
 import hashlib
 import json
 import os
@@ -271,7 +268,7 @@ def sort_by_region(candidates: list[tuple[str, float]],
 # FUZZY MATCHING
 # =============================================================================
 _TAG_RE    = re.compile(r"\s*[\(\[].*?[\)\]]")
-_SEQNUM_RE = re.compile(r"_\d+$")   # strips _1, _2 ... (duplicate ROM suffixes)
+_SEQNUM_RE = re.compile(r"_\d+$")   # strips trailing _1, _2 ... so "Game_1" matches the cover for "Game"
 _WORD_RE   = re.compile(r"\W+")       # word tokenizer for Jaccard scoring
 _WS_RE     = re.compile(r"\s+")       # whitespace collapser for strip_tags
 
@@ -280,7 +277,12 @@ def strip_tags(name: str) -> str:
     return _WS_RE.sub(" ", _TAG_RE.sub("", name)).strip()
 
 def normalize(name: str) -> str:
-    """Strip region/language tags AND trailing sequence numbers (_1, _2...)."""
+    """Strip region/language tags and trailing sequence numbers (_1, _2…) for cover matching.
+
+    This is a name normalisation step for fuzzy cover lookup only — it does NOT
+    imply the file is a duplicate.  Duplicate detection is content-based (CRC32 + SHA-1)
+    and lives entirely in check_duplicates(), which never calls this function.
+    """
     return _SEQNUM_RE.sub("", strip_tags(name)).strip()
 
 def _similarity_prenorm(a_low: str, a_norm: str, b_low: str, b_norm: str) -> float:
@@ -1948,7 +1950,8 @@ def _hash_file(path: Path, offset: int = 0,
 
 
 def check_duplicates(roms_base: Path, common: list[str],
-                     single_system: bool, parallel_jobs: int) -> None:
+                     single_system: bool, parallel_jobs: int,
+                     dry_run: bool = True) -> None:
     """
     Three-stage duplicate detection:
       1. Group by file size    (free — stat() already needed for reporting)
@@ -1958,6 +1961,8 @@ def check_duplicates(roms_base: Path, common: list[str],
     Empty files (size == 0) are reported separately as broken/placeholder ROMs
     rather than being falsely grouped as duplicates of each other.
     A file is only reported as a duplicate when size + CRC32 + SHA-1 all agree.
+    After the report, _report_duplicates prompts the user interactively to clean up.
+    dry_run: when True the deletion prompt still shows but no files are removed.
     """
     print()
     cprint(C.CYAN, "=============================================")
@@ -2029,7 +2034,7 @@ def check_duplicates(roms_base: Path, common: list[str],
     print()
 
     if not size_candidates:
-        _report_duplicates([], empty_files, unreadable, all_rom_files)
+        _report_duplicates([], empty_files, unreadable, all_rom_files, dry_run=dry_run)
         return
 
     # ------------------------------------------------------------------
@@ -2112,15 +2117,21 @@ def check_duplicates(roms_base: Path, common: list[str],
                 cprint(C.GRAY, f"      - {p}")
         print()
 
-    _report_duplicates(confirmed, empty_files, unreadable, all_rom_files)
+    _report_duplicates(confirmed, empty_files, unreadable, all_rom_files, dry_run=dry_run)
 
 
 def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                        empty_files: list[Path],
                        unreadable: list[Path],
-                       all_rom_files: list[Path]) -> None:
-    """Print the final duplicate report.
-    confirmed: list of groups, each group is [(path, crc32_hex, sha1_hex, size_bytes), ...].
+                       all_rom_files: list[Path],
+                       dry_run: bool = True) -> None:
+    """Print the final duplicate report, then prompt the user to delete if duplicates exist.
+
+    confirmed: list of groups, each group is [(path, crc32_hex, sha1_hex, size_bytes), ...]
+    dry_run:   when True the deletion prompt is shown but no files are removed;
+               the user still sees exactly what would happen.
+    After the report, the user is asked which files to keep and whether to proceed.
+    Running from a non-interactive context (pipe/redirect) skips the prompt safely.
     """
 
     if empty_files:
@@ -2174,6 +2185,115 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     cprint(C.CYAN, f"  Empty files      : {len(empty_files)}")
     cprint(C.CYAN, f"  Unreadable       : {len(unreadable)}")
     cprint(C.CYAN, "=============================================")
+    print()
+
+    if not confirmed:
+        return
+
+    # ------------------------------------------------------------------
+    # Interactive deletion prompt — only when stdout is a real terminal.
+    # Piped/redirected runs (CI, scripts) skip silently so they never block.
+    # ------------------------------------------------------------------
+    if not sys.stdout.isatty():
+        return
+
+    _prompt_delete_duplicates(confirmed, dry_run=dry_run)
+
+
+# Keep-strategy sort keys: each returns (primary_sort_key, path) so the first
+# element after sorting is the file to KEEP.
+_KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[tuple[Path,str,str,int]], tuple]"]] = {
+    "1": ("shortest filename",  lambda t: (len(t[0].name),  t[0].name)),
+    "2": ("smallest file size", lambda t: (t[3],             t[0].name)),
+    "3": ("oldest file",        lambda t: (t[0].stat().st_mtime if t[0].exists() else 0, t[0].name)),
+    "4": ("newest file",        lambda t: (-t[0].stat().st_mtime if t[0].exists() else 0, t[0].name)),
+}
+
+
+def _prompt_delete_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
+                              dry_run: bool = True) -> None:
+    """Ask the user whether and how to clean up confirmed duplicate groups.
+
+    Flow:
+      1. Ask whether to delete at all.
+      2. Ask which file to keep (strategy applies to every group uniformly).
+      3. Show a preview of what will be kept / deleted.
+      4. Ask for final confirmation before touching any file.
+    dry_run: when True shows the full preview and confirmation prompt but
+             does not remove any files — matches the global --no-dry-run flag.
+    """
+    print()
+    cprint(C.CYAN, "─" * 45)
+    cprint(C.CYAN, "  CLEANUP")
+    cprint(C.CYAN, "─" * 45)
+    print()
+
+    # Step 1: delete or not
+    delete_ch = prompt_choice("  Do you want to delete the redundant ROMs?", {
+        "y": f"{C.RED}Yes{C.RESET} — delete extras, keep one per group",
+        "n": f"{C.GREEN}No{C.RESET}  — keep the report, do nothing",
+    })
+    if delete_ch == "n":
+        cprint(C.GRAY, "  No files were changed.")
+        return
+    print()
+
+    # Step 2: which file to keep
+    strat_ch = prompt_choice("  Which file to keep from each duplicate group?", {
+        k: f"{C.CYAN}{label}{C.RESET}" for k, (label, _) in _KEEP_STRATEGIES.items()
+    })
+    _, sort_key = _KEEP_STRATEGIES[strat_ch]
+    strategy_label = _KEEP_STRATEGIES[strat_ch][0]
+    print()
+
+    # Step 3: build the plan and preview it
+    plan: list[tuple[Path, list[Path]]] = []  # (keep, [to_delete, ...])
+    for group in confirmed:
+        ordered = sorted(group, key=sort_key)
+        keep    = ordered[0][0]
+        to_del  = [t[0] for t in ordered[1:]]
+        plan.append((keep, to_del))
+
+    n_to_delete = sum(len(d) for _, d in plan)
+    cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
+    print()
+    for keep, to_del in plan:
+        cprint(C.GREEN, f"  KEEP    {keep.name}")
+        for p in to_del:
+            cprint(C.RED, f"  DELETE  {p.name}  ({p.parent})")
+    print()
+    cprint(C.YELLOW, f"  {n_to_delete} file(s) will be permanently deleted.")
+    print()
+
+    # Step 4: final confirmation
+    confirm_ch = prompt_choice("  Proceed?", {
+        "y": f"{C.RED}Yes, delete now{C.RESET}",
+        "n": f"{C.GREEN}No, cancel{C.RESET}",
+    })
+    if confirm_ch == "n":
+        cprint(C.GRAY, "  Cancelled — no files were changed.")
+        return
+
+    # Execute
+    print()
+    if dry_run:
+        cprint(C.MAGENTA, "  [DRY RUN] No files were changed.")
+        cprint(C.MAGENTA, "  Re-run with --no-dry-run to apply.")
+        print()
+        return
+
+    deleted = 0
+    for keep, to_del in plan:
+        cprint(C.GREEN, f"  KEPT    {keep.name}")
+        for path in to_del:
+            try:
+                path.unlink()
+                cprint(C.RED, f"  DELETED {path}")
+                deleted += 1
+            except OSError as e:
+                cprint(C.YELLOW, f"  FAILED  {path}: {e}")
+    print()
+    cprint(C.CYAN, f"  Done — {deleted} file(s) deleted.")
     print()
 
 
@@ -2583,7 +2703,7 @@ def _wiz_confirm(dry_run: bool, task: str, opts: dict[str, str]) -> None:
 
 
 def _prompt_sgdb_key(existing: str, required: bool = False) -> str | None:
-    """Prompt for SteamGridDB API key.
+    """Prompt for SteamGridDB API key with echo suppressed (like a password).
 
     required=False (default): key is optional; returns "" if skipped.
     required=True: legacy — warns more strongly but still allows skipping.
@@ -2601,7 +2721,8 @@ def _prompt_sgdb_key(existing: str, required: bool = False) -> str | None:
     print()
     prompt = "  Enter SGDB key: " if required else "  Enter SGDB key (or press Enter to skip): "
     try:
-        key = input(prompt).strip()
+        # getpass suppresses terminal echo — key never appears on screen or in scrollback.
+        key = getpass.getpass(prompt).strip()
     except KeyboardInterrupt:
         print(); raise
     return (key or None) if required else key
@@ -2779,7 +2900,10 @@ def _wizard(
     # ── 6. Duplicate check (early exit) ──────────────────────────────
     if is_dup:
         print()
-        check_duplicates(roms_base, common, single_system, args.parallel_jobs)
+        # Wizard always runs in dry_run mode for dedup — to actually delete,
+        # use CLI: python sync-covers.py --check-duplicates --no-dry-run --roms ...
+        check_duplicates(roms_base, common, single_system, args.parallel_jobs,
+                         dry_run=True)
         sys.exit(0)
 
     # ── 7. Download options ───────────────────────────────────────────
@@ -2798,6 +2922,7 @@ def _wizard(
 
     # ── 8-9. Cover style, region, SGDB key ──────────────────────────────
     sgdb_key = (args.sgdb_key or "").strip()
+    args.sgdb_key = None   # scrub — credential no longer needed in namespace
     cover_style, preferred_region, sgdb_key, bg_style = _wiz_cover_options(
         need_covers, need_bgs, sgdb_key
     )
@@ -2917,9 +3042,11 @@ def main() -> None:
                         choices=["any", "usa", "europe", "japan", "world"],
                         help="Preferred cover region (default: any)")
     parser.add_argument("--sgdb-key",         default=os.environ.get("SGDB_KEY", ""),
-                        help="SteamGridDB API key. Also read from SGDB_KEY env var.")
+                        help="SteamGridDB API key (prefer SGDB_KEY env var — "
+                             "passing secrets on the CLI exposes them in process lists and shell history).")
     parser.add_argument("--check-duplicates", action="store_true",
                         help="Scan ROMs for duplicates (runs instead of cover sync)")
+
     parser.add_argument("--threshold",        type=float, default=0.4,
                         help="Fuzzy match threshold 0.0-1.0 (default 0.4)")
     parser.add_argument("--parallel-jobs",    type=int,   default=6,
@@ -2929,15 +3056,21 @@ def main() -> None:
     parser.add_argument("--http-timeout",     type=int,   default=30,
                         help="HTTP request timeout in seconds (default 30)")
     parser.add_argument("--github-token",     default=os.environ.get("GITHUB_TOKEN", ""),
-                        help="GitHub personal access token")
+                        help="GitHub personal access token (prefer GITHUB_TOKEN env var — "
+                             "passing secrets on the CLI exposes them in process lists and shell history).")
     parser.add_argument("--report",           default="",
                         help="Report file path. Defaults to sync-covers_report_YYYYMMDD_HHMMSS.txt "
                              "next to the script. Pass 'none' to disable.")
     args = parser.parse_args()
 
+    # Extract credentials immediately and scrub them from args so they don't
+    # linger in argparse.Namespace.__repr__ (visible in tracebacks / logs).
+    # Prefer env vars; --sgdb-key / --github-token are kept for convenience
+    # but users should favour the env var form to avoid shell history leaks.
     dry_run = not args.no_dry_run
     magick  = find_magick()
     token   = args.github_token or None
+    args.github_token = None   # scrub — credential no longer needed in namespace
 
     # ------------------------------------------------------------------
     # Wizard mode: no substantive args provided
@@ -2962,7 +3095,8 @@ def main() -> None:
             roms_base, args.system, rom_ext_filter=ROM_EXTENSIONS)
         if single_system and not common:
             common = [prompt_system()]
-        check_duplicates(roms_base, common, single_system, args.parallel_jobs)
+        check_duplicates(roms_base, common, single_system, args.parallel_jobs,
+                         dry_run=dry_run)
         sys.exit(0)
 
     # Resolve required paths
@@ -2987,6 +3121,7 @@ def main() -> None:
     cover_style      = args.cover_style.replace("-", "_")
     preferred_region = args.region
     sgdb_key         = args.sgdb_key or None
+    args.sgdb_key    = None   # scrub — credential no longer needed in namespace
     delete_orphans   = args.delete_orphans
 
     if covers_base and bgs_base:
