@@ -1885,14 +1885,47 @@ ROM_EXTENSIONS = {
     ".wsc", ".ngp", ".ngc",
 }
 
+# SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
+# prepended to the raw ROM data.  The header is not part of the game content,
+# so two identical ROMs — one headered (.smc) and one headerless (.sfc or a
+# clean .smc) — differ in file size by exactly 512 bytes and would never be
+# grouped together by the size-based Stage 1 filter without normalisation.
+#
+# Detection rule (from the SNES ROM spec):
+#   size % 1024 == 512  AND  extension in _SMC_HEADER_EXTS  AND  size > 512
+#
+# The size > 512 guard prevents a degenerate 512-byte file (not a real ROM)
+# from being stripped down to 0 bytes.
+_SMC_HEADER_SIZE: int       = 512
+_SMC_HEADER_EXTS: frozenset = frozenset({".smc", ".sfc"})
+
+
+def _smc_header_offset(path: Path, size: int) -> int:
+    """Return 512 if path looks like a headered SNES ROM, else 0.
+
+    Used by both the Stage-1 size normalisation and the Stage-2 hash to ensure
+    both steps agree on which bytes represent the actual ROM content.
+    """
+    return (
+        _SMC_HEADER_SIZE
+        if (size > _SMC_HEADER_SIZE
+            and size % 1024 == _SMC_HEADER_SIZE
+            and path.suffix.lower() in _SMC_HEADER_EXTS)
+        else 0
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hashing helpers
 # ---------------------------------------------------------------------------
-def _hash_file(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str] | None:
-    """
-    Read path once, computing CRC32 and SHA-1 simultaneously.
+def _hash_file(path: Path, offset: int = 0,
+               chunk_size: int = 1 << 20) -> tuple[str, str] | None:
+    """Read path once (skipping leading `offset` bytes), computing CRC32 + SHA-1.
+
+    offset: bytes to skip at the start of the file (e.g. SMC copier header).
+            Must be obtained from _smc_header_offset() so Stage 1 and Stage 2
+            always agree on the effective ROM content.
     Returns (crc32_hex, sha1_hex) or None on any read error.
-    Single-pass keeps I/O cost identical to the old CRC32-only approach.
     """
     # Single outer guard: returns None on ANY failure (I/O, FIPS init, etc.)
     try:
@@ -1904,6 +1937,8 @@ def _hash_file(path: Path, chunk_size: int = 1 << 20) -> tuple[str, str] | None:
         except TypeError:  # Python 3.8 lacks the kwarg
             sha = hashlib.sha1()
         with open(path, "rb") as f:
+            if offset:
+                f.seek(offset)  # skip copier header — not part of ROM content
             while chunk := f.read(chunk_size):
                 crc = zlib.crc32(chunk, crc)
                 sha.update(chunk)
@@ -1952,12 +1987,19 @@ def check_duplicates(roms_base: Path, common: list[str],
     print()
 
     # ------------------------------------------------------------------
-    # Stage 1: group by size (free — no I/O beyond stat)
+    # Stage 1: group by normalised size (free — no I/O beyond stat)
+    #
+    # SNES ROMs can carry a 512-byte copier header (see _smc_header_offset).
+    # Grouping by raw size would place a headered and a headerless copy of the
+    # same ROM in different buckets, silently skipping the hash comparison.
+    # We group by the normalised (header-stripped) size instead, and store the
+    # offset alongside each path so Stage 2 hashes the same ROM content.
     # ------------------------------------------------------------------
     cprint(C.GRAY, "  Stage 1/3 — grouping by file size...")
     empty_files: list[Path]       = []
     unreadable:  list[Path]       = []
-    by_size:     dict[int, list[Path]] = defaultdict(list)
+    # key = normalised size; value = list of (path, raw_size, header_offset)
+    by_size: dict[int, list[tuple[Path, int, int]]] = defaultdict(list)
 
     for p in all_rom_files:
         try:
@@ -1968,13 +2010,17 @@ def check_duplicates(roms_base: Path, common: list[str],
         if sz == 0:
             empty_files.append(p)
         else:
-            by_size[sz].append(p)
+            offset   = _smc_header_offset(p, sz)
+            norm_sz  = sz - offset          # effective ROM content size
+            by_size[norm_sz].append((p, sz, offset))
 
-    # Only files sharing their size with ≥1 other file need hashing
-    size_candidates: list[tuple[Path, int]] = [
-        (p, sz) for sz, paths in by_size.items() if len(paths) > 1 for p in paths
+    # Only files sharing their normalised size with ≥1 other file need hashing
+    size_candidates: list[tuple[Path, int, int]] = [
+        (p, sz, off)
+        for entries in by_size.values() if len(entries) > 1
+        for p, sz, off in entries
     ]
-    size_unique = sum(1 for paths in by_size.values() if len(paths) == 1)
+    size_unique = sum(1 for entries in by_size.values() if len(entries) == 1)
 
     cprint(C.GRAY,
            f"    {size_unique} unique-size files skipped  |  "
@@ -1992,24 +2038,25 @@ def check_duplicates(roms_base: Path, common: list[str],
     # ------------------------------------------------------------------
     cprint(C.GRAY, f"  Stage 2/3 — hashing {len(size_candidates)} candidate(s)...")
 
-    # (size, crc32) -> [(path, sha1), ...]
+    # (norm_size, crc32) -> [(path, sha1), ...]
     hash_results: dict[tuple[int, str], list[tuple[Path, str]]] = defaultdict(list)
     hash_lock  = threading.Lock()
     done_count = 0
     total      = len(size_candidates)
 
-    def hash_one(path: Path, known_size: int) -> None:
-        # known_size comes from stage-1 stat() — no second syscall needed
-        hashes = _hash_file(path)
+    def hash_one(path: Path, raw_size: int, offset: int) -> None:
+        # offset from _smc_header_offset — skips copier header if present
+        hashes = _hash_file(path, offset=offset)
+        norm_sz = raw_size - offset
         with hash_lock:
             if hashes is None:
                 unreadable.append(path)
             else:
                 crc, sha = hashes
-                hash_results[(known_size, crc)].append((path, sha))
+                hash_results[(norm_sz, crc)].append((path, sha))
 
     with ThreadPoolExecutor(max_workers=parallel_jobs) as pool:
-        futures = {pool.submit(hash_one, p, sz): p for p, sz in size_candidates}
+        futures = {pool.submit(hash_one, p, sz, off): p for p, sz, off in size_candidates}
         try:
             for fut in as_completed(futures):
                 try:
