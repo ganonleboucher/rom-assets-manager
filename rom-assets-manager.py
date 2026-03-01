@@ -5,41 +5,11 @@ sync-covers.py — Download and sync cover art & backgrounds to a ROM library.
 Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
 Sources: libretro-thumbnails (GitHub) · SteamGridDB · LaunchBox GamesDB
 
-USAGE
-    python sync-covers.py                  # interactive wizard (no args = wizard mode)
-    python sync-covers.py --no-dry-run ... # apply changes (default is a safe dry run)
-
-COVER STYLES  (--cover-style)
-    with-logo     Box art + system logo [default]   libretro → LaunchBox
-    without-logo  Clean cover, no logo              SteamGridDB → LB Screenshot
-    game-logo     Title / logo art, no box          SteamGridDB → libretro → LB Clear Logo
-
-BACKGROUND STYLES  (--bg-style)
-    fanart   Hero art at 1920×1080 [default]        SteamGridDB Heroes → LB Fanart
-    boxart   Box art letterboxed to 1920×1080       libretro Named_Boxarts → LB Box-Front
-
-OPTIONS
-    --roms PATH            Root folder containing ROM subfolders (or a single system folder)
-    --covers PATH          Output folder for cover art
-    --backgrounds PATH     Output folder for background art
-    --system NAME          Target a single system (e.g. snes, psx) instead of all subfolders
-    --no-dry-run           Actually write files; omit this flag to preview changes safely
-    --delete-orphans       Remove covers/backgrounds that have no matching ROM file
-    --download-mode MODE   missing (default) | all (re-download) | skip (rename only)
-    --cover-style STYLE    with-logo (default) | without-logo | game-logo
-    --bg-style STYLE       fanart (default) | boxart
-    --region REGION        Prefer a region: any (default) | usa | europe | japan | world
-    --check-duplicates     Scan ROMs for duplicates by CRC32+SHA-1 (skips cover sync)
-    --threshold FLOAT      Fuzzy-match sensitivity 0.0–1.0, lower = looser (default 0.4)
-    --parallel-jobs INT    Concurrent download workers (default 6)
-    --cache-ttl INT        GitHub API file-list cache lifetime in hours (default 24)
-    --http-timeout INT     Per-request HTTP timeout in seconds (default 30)
-    --github-token TOKEN   GitHub PAT — prefer env var GITHUB_TOKEN (raises limit 60→5000 req/h)
-    --sgdb-key KEY         SteamGridDB API key — prefer env var SGDB_KEY (free at steamgriddb.com)
-    --report PATH          Write a plain-text run report; pass none to disable
+Run with no arguments to launch the interactive wizard.
+Run with --help to see all CLI options.
 
 DEPENDENCIES
-    ImageMagick   Required for conversion and resizing.
+    ImageMagick   Required for image conversion and resizing.
                   Windows: winget install ImageMagick.Q16-HDRI
                   Linux:   sudo apt install imagemagick
 """
@@ -58,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -550,6 +521,17 @@ REGION_LABELS: dict[str, str] = {
     "japan":  "Japan",
     "world":  "World",
     "any":    "No preference",
+}
+
+_COVER_STYLE_LABELS: dict[str, str] = {
+    "with_logo":    "with logo",
+    "without_logo": "without logo (SGDB)",
+    "game_logo":    "game logo",
+}
+
+_BG_STYLE_LABELS: dict[str, str] = {
+    "fanart": "fanart/heroes",
+    "boxart": "box art (letterboxed)",
 }
 
 _REGION_TAG_RE = re.compile(r'\(([^)]+)\)')
@@ -2238,6 +2220,16 @@ ROM_EXTENSIONS = {
 # excluded from duplicate detection entirely — they are not game data.
 _CDDA_TRACK_RE = re.compile(r'\btrack\s*\d+\b', re.IGNORECASE)
 
+# Disc-number tag pattern: "(Disc 1)", "(Disc 2)", "(CD1)", "(CD2)", etc.
+# Used by Stage 4 to detect multi-disc games and exclude them from suspected-
+# duplicate reporting — Disc 1 and Disc 2 are parts of one game, not copies.
+_DISC_TAG_RE = re.compile(r'\b(?:disc|disk|cd)\s*\d+\b', re.IGNORECASE)
+
+# Sidecar extensions: companion metadata files, not standalone ROM data.
+# Excluded from Stage 4 name-grouping to prevent .cue from being grouped
+# with its paired .bin and reported as a suspected same-title duplicate.
+_SIDECAR_EXTS: frozenset = frozenset({".cue", ".sbi", ".m3u", ".gdi"})
+
 # SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
 # prepended to the raw ROM data.  The header is not part of the game content,
 # so two identical ROMs — one headered (.smc) and one headerless (.sfc or a
@@ -2295,24 +2287,73 @@ def _hash_file(path: Path, offset: int = 0,
     except Exception:  # OSError, MemoryError, unexpected hashlib error, etc.
         return None
 
+def _build_suspected(all_rom_files: list[Path],
+                     confirmed_paths: set[Path]) -> list[list[Path]]:
+    """Return groups of files that share a normalized title but differ in content.
+
+    Exclusion rules (applied in order):
+      1. Files already flagged as confirmed hash-duplicates are skipped.
+      2. Sidecar extensions (.cue, .sbi, .m3u, .gdi) are skipped — they are
+         companion metadata files, not standalone ROMs.
+      3. Grouping key is (normalized_stem, extension) so a Game Gear .gg and a
+         Mega Drive .smd with the same game title are never grouped together —
+         they are different games on different hardware.
+      4. Any group where every member contains a disc-number tag (Disc 1, CD2…)
+         and no two members share the same disc number is a multi-disc game,
+         not a collection of duplicates, and is excluded.
+    """
+    name_groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    for p in all_rom_files:
+        if p in confirmed_paths:
+            continue
+        if p.suffix.lower() in _SIDECAR_EXTS:
+            continue
+        norm_name = normalize(p.stem).lower().strip()
+        if not norm_name:
+            continue
+        key = (norm_name, p.suffix.lower())
+        name_groups[key].append(p)
+
+    suspected: list[list[Path]] = []
+    for paths in name_groups.values():
+        if len(paths) < 2:
+            continue
+        # Multi-disc filter: if every file has a disc tag and all disc
+        # numbers are distinct, this is one multi-disc game, not duplicates.
+        disc_nums = []
+        for p in paths:
+            m = _DISC_TAG_RE.search(p.stem)
+            disc_nums.append(m.group(0).lower() if m else None)
+        all_have_disc = all(d is not None for d in disc_nums)
+        all_disc_different = len(set(disc_nums)) == len(disc_nums)
+        if all_have_disc and all_disc_different:
+            continue
+        suspected.append(sorted(paths))
+
+    return suspected
+
+
 def check_duplicates(roms_base: Path, common: list[str],
                      single_system: bool, parallel_jobs: int,
                      dry_run: bool = True) -> None:
     """
-    Three-stage duplicate detection:
+    Four-stage duplicate detection:
       1. Group by file size    (free — stat() already needed for reporting)
       2. CRC32 + SHA-1 on size-candidates only  (skip unique-size files)
       3. Confirm by (size, CRC32, SHA-1) agreement
+      4. Name-based fuzzy matching: group remaining files by normalize(stem)
+         to surface same-title pairs that differ at the byte level
+         (e.g. regional variants, NTSC/PAL conversions, patched ROMs).
     Empty files (size == 0) are reported separately as broken/placeholder ROMs
     rather than being falsely grouped as duplicates of each other.
-    A file is only reported as a duplicate when size + CRC32 + SHA-1 all agree.
+    A file is only reported as an exact duplicate when size + CRC32 + SHA-1 all agree.
     After the report, _report_duplicates prompts the user interactively to clean up.
     dry_run: when True the deletion prompt still shows but no files are removed.
     """
     print()
     cprint(C.CYAN, "=============================================")
     cprint(C.CYAN, "  DUPLICATE ROM DETECTION")
-    cprint(C.CYAN, "  (size → CRC32 → SHA-1 pipeline)")
+    cprint(C.CYAN, "  (size → CRC32 → SHA-1, then title-name matching)")
     cprint(C.CYAN, "=============================================")
     print()
 
@@ -2349,7 +2390,7 @@ def check_duplicates(roms_base: Path, common: list[str],
     # We group by the normalised (header-stripped) size instead, and store the
     # offset alongside each path so Stage 2 hashes the same ROM content.
     # ------------------------------------------------------------------
-    cprint(C.GRAY, "  Stage 1/3 — grouping by file size...")
+    cprint(C.GRAY, "  Stage 1/4 — grouping by file size...")
     empty_files: list[Path]       = []
     unreadable:  list[Path]       = []
     # key = normalised size; value = list of (path, raw_size, header_offset)
@@ -2383,14 +2424,18 @@ def check_duplicates(roms_base: Path, common: list[str],
     print()
 
     if not size_candidates:
-        _report_duplicates([], empty_files, unreadable, all_rom_files, dry_run=dry_run)
+        # No exact-size candidates, but name-based matches may still exist.
+        confirmed_paths: set[Path] = set()
+        suspected = _build_suspected(all_rom_files, confirmed_paths)
+        print()
+        _report_duplicates([], suspected, empty_files, unreadable, all_rom_files, dry_run=dry_run)
         return
 
     # ------------------------------------------------------------------
     # Stage 2: CRC32 + SHA-1 on candidates only (parallel, with progress)
     # Both hashes computed in a single sequential read per file.
     # ------------------------------------------------------------------
-    cprint(C.GRAY, f"  Stage 2/3 — hashing {len(size_candidates)} candidate(s)...")
+    cprint(C.GRAY, f"  Stage 2/4 — hashing {len(size_candidates)} candidate(s)...")
 
     # (norm_size, crc32) -> [(path, sha1), ...]
     hash_results: dict[tuple[int, str], list[tuple[Path, str]]] = defaultdict(list)
@@ -2433,7 +2478,7 @@ def check_duplicates(roms_base: Path, common: list[str],
     # Any bucket where 2+ files share size+CRC32+SHA-1 is a true duplicate.
     # CRC32-only matches that differ on SHA-1 are reported as near-collisions.
     # ------------------------------------------------------------------
-    cprint(C.GRAY, "  Stage 3/3 — confirming by SHA-1...")
+    cprint(C.GRAY, "  Stage 3/4 — confirming by SHA-1...")
     confirmed:      list[list[tuple[Path, str, str, int]]] = []  # (path, crc32, sha1, size)
     near_collisions: list[tuple[int, str, list[Path]]] = []  # (size, crc, paths)
 
@@ -2456,6 +2501,19 @@ def check_duplicates(roms_base: Path, common: list[str],
             if nc_paths:
                 near_collisions.append((sz, crc, nc_paths))
 
+    # ------------------------------------------------------------------
+    # Stage 4: name-based fuzzy detection for same-title, different-ROM pairs
+    #
+    # Example: "Asterix.smc" (PAL) and "Asterix (NTSC).smc" (NTSC conversion)
+    # share the same game but differ at the byte level, so the hash pipeline
+    # above correctly does NOT flag them as content duplicates.  However the
+    # user likely still wants to know they have two copies of the same title.
+    # See _build_suspected() for full exclusion rules (sidecar files, cross-
+    # platform same-title, multi-disc games).
+    # ------------------------------------------------------------------
+    confirmed_paths: set[Path] = {p for g in confirmed for p, _, _, _ in g}
+    suspected = _build_suspected(all_rom_files, confirmed_paths)
+
     print()
     if near_collisions:
         cprint(C.YELLOW, f"  {len(near_collisions)} CRC32 collision(s) resolved by SHA-1"
@@ -2466,15 +2524,17 @@ def check_duplicates(roms_base: Path, common: list[str],
                 cprint(C.GRAY, f"      - {p}")
         print()
 
-    _report_duplicates(confirmed, empty_files, unreadable, all_rom_files, dry_run=dry_run)
+    _report_duplicates(confirmed, suspected, empty_files, unreadable, all_rom_files, dry_run=dry_run)
 
 def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
+                       suspected: list[list[Path]],
                        empty_files: list[Path],
                        unreadable: list[Path],
                        all_rom_files: list[Path],
                        dry_run: bool = True) -> None:
     """Print the final duplicate report, then prompt the user to delete if duplicates exist.
-    confirmed: list of groups, each group is [(path, crc32_hex, sha1_hex, size_bytes), ...]
+    confirmed: list of groups, each is [(path, crc32_hex, sha1_hex, size_bytes), ...]
+    suspected: list of groups whose normalized names match but bytes differ.
     """
 
     if empty_files:
@@ -2490,7 +2550,7 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
         print()
 
     if not confirmed:
-        cprint(C.GREEN, "  No duplicates found!")
+        cprint(C.GREEN, "  No exact duplicates found!")
     else:
         cprint(C.DRED, f"  Found {len(confirmed)} group(s) of confirmed duplicate ROMs:")
         total_wasted = 0
@@ -2510,6 +2570,18 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
         cprint(C.YELLOW,
                f"  Total recoverable space: {total_wasted / (1024 * 1024):.1f} MB")
 
+    # -- Suspected duplicates (same title, different bytes) ---------------
+    if suspected:
+        print()
+        cprint(C.DYELLOW, f"  {len(suspected)} group(s) of same-title ROMs with different content:")
+        cprint(C.GRAY,    "  (different region/version/patch — review manually)")
+        for group in sorted(suspected, key=lambda g: g[0]):
+            cprint(C.DYELLOW, f"\n  '{normalize(group[0].stem)}'")
+            for p in group:
+                sz = p.stat().st_size if p.exists() else 0
+                cprint(C.YELLOW, f"    - {p.name}  ({sz:,} bytes)")
+        print()
+
     dup_paths    = {fp for g in confirmed for fp, _, _, _ in g}
     empty_set    = set(empty_files)
     unread_set   = set(unreadable)
@@ -2524,7 +2596,8 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     cprint(C.CYAN, f"  Total scanned    : {len(all_rom_files)}")
     cprint(C.CYAN, f"  Distinct games   : {distinct_games}")
     cprint(C.CYAN, f"  Unique files     : {n_unique}")
-    cprint(C.CYAN, f"  Duplicate groups : {len(confirmed)}")
+    cprint(C.CYAN, f"  Exact duplicates : {len(confirmed)}")
+    cprint(C.CYAN, f"  Same-title pairs : {len(suspected)}")
     cprint(C.CYAN, f"  Empty files      : {len(empty_files)}")
     cprint(C.CYAN, f"  Unreadable       : {len(unreadable)}")
     cprint(C.CYAN, "=============================================")
@@ -3353,9 +3426,14 @@ def main() -> None:
     script_stem = script_path.stem
 
     parser = argparse.ArgumentParser(
-        description="Sync cover art to ROM library.",
+        prog="sync-covers.py",
+        description=(
+            "Download and sync cover art & backgrounds to a ROM library.\n"
+            "Run with no arguments to launch the interactive wizard.\n\n"
+            "Sources: libretro-thumbnails · SteamGridDB · LaunchBox GamesDB\n"
+            "Requires: ImageMagick  (winget install ImageMagick.Q16-HDRI  /  apt install imagemagick)"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
     parser.add_argument("--roms",             default="",
                         help="ROMs root folder")
@@ -3372,9 +3450,11 @@ def main() -> None:
     parser.add_argument("--download-mode",    default="missing",
                         choices=["missing", "all", "skip"],
                         help="Download behaviour (default: missing)")
-    parser.add_argument("--cover-style",      default="with-logo",
-                        choices=["with-logo", "without-logo", "game-logo"],
-                        help="Cover art style: with-logo (box art), without-logo (SGDB grids → LB Screenshot, key optional), game-logo (title art)")
+    parser.add_argument("--cover-style",      default="with_logo",
+                        choices=["with_logo", "without_logo", "game_logo"],
+                        help="Cover art style: with_logo (box art + system logo, default), "
+                             "without_logo (SGDB grids / LB Screenshot), "
+                             "game_logo (title art)")
     parser.add_argument("--bg-style",         default="fanart",
                         choices=["fanart", "boxart"],
                         help="Background art style: fanart (SGDB Heroes/LB Fanart) or boxart (box art letterboxed to 1920x1080)")
@@ -3464,7 +3544,7 @@ def main() -> None:
         cprint(C.RED, f"  ROMs path not found: '{roms_base}'"); sys.exit(1)
 
     download_mode    = args.download_mode
-    cover_style      = args.cover_style.replace("-", "_")
+    cover_style      = args.cover_style
     preferred_region = args.region
     sgdb_key         = args.sgdb_key or None
     args.sgdb_key    = None   # scrub — credential no longer needed in namespace
@@ -3503,15 +3583,9 @@ def main() -> None:
         cprint(C.CYAN, f"  Backgrounds : {bgs_base}")
     cprint(C.CYAN, f"  Download    : {download_mode}")
     if task in ("covers","both"):
-        _STYLE_LABELS_CLI = {
-            "with_logo":    "with logo",
-            "without_logo": "without logo (SGDB)",
-            "game_logo":    "game logo",
-        }
-        cprint(C.CYAN, f"  Style       : {_STYLE_LABELS_CLI.get(cover_style, cover_style)}")
+        cprint(C.CYAN, f"  Style       : {_COVER_STYLE_LABELS.get(cover_style, cover_style)}")
     if task in ("backgrounds", "both"):
-        _BG_STYLE_LABELS_CLI = {"fanart": "fanart/heroes", "boxart": "box art (letterboxed)"}
-        cprint(C.CYAN, f"  BG style    : {_BG_STYLE_LABELS_CLI.get(args.bg_style, args.bg_style)}")
+        cprint(C.CYAN, f"  BG style    : {_BG_STYLE_LABELS.get(args.bg_style, args.bg_style)}")
     if preferred_region != "any":
         cprint(C.CYAN, f"  Region      : {REGION_LABELS.get(preferred_region, preferred_region)}")
     cprint(C.GREEN if sgdb_key else C.GRAY,
@@ -3562,10 +3636,9 @@ def main() -> None:
 
 # =============================================================================
 # UNIT TESTS
-# Run with: python sync-covers_refactored.py --test
-# or:       python -m pytest sync-covers_refactored.py  (requires pytest)
+# Run with: python sync-covers.py --test
+# or:       python -m pytest sync-covers.py  (requires pytest)
 # =============================================================================
-import unittest
 
 
 class TestNormalize(unittest.TestCase):
@@ -3767,8 +3840,6 @@ def _run_tests() -> None:
 
 
 if __name__ == "__main__":
-    if "--test" in sys.argv:
-        _run_tests()
     try:
         main()
     except KeyboardInterrupt:
