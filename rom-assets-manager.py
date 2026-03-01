@@ -1,86 +1,51 @@
 #!/usr/bin/env python3
 """
-sync-covers.py  —  sync cover art and backgrounds to your ROM library
-Windows / Linux / macOS  ·  Python 3.8+  ·  no external dependencies
+sync-covers.py — Download and sync cover art & backgrounds to a ROM library.
 
-─────────────────────────────────────────────────────
- QUICKSTART
-─────────────────────────────────────────────────────
-  Just run it — the wizard will ask for everything:
+Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
+Sources: libretro-thumbnails (GitHub) · SteamGridDB · LaunchBox GamesDB
 
-    python sync-covers.py
+USAGE
+    python sync-covers.py                          # interactive wizard (first run)
+    python sync-covers.py --no-dry-run             # apply changes (dry-run by default)
+        --roms ~/retro/roms --covers ~/retro/covers
 
-  Nothing is written until you confirm. Use --no-dry-run to apply.
+COVER STYLES  (--cover-style)
+    with-logo     Box art + system logo [default]   libretro → LaunchBox
+    without-logo  Clean cover, no logo              SteamGridDB → LB Screenshot
+    game-logo     Title / logo art, no box          SteamGridDB → libretro → LB Clear Logo
 
-─────────────────────────────────────────────────────
- COVER STYLES  (--cover-style)
-─────────────────────────────────────────────────────
-  with-logo    Official box art + system logo  (default)
-               libretro-thumbnails → LaunchBox
+BACKGROUND STYLES  (--bg-style)
+    fanart   Hero art at 1920×1080 [default]        SteamGridDB Heroes → LB Fanart
+    boxart   Box art letterboxed to 1920×1080       libretro Named_Boxarts → LB Box-Front
 
-  without-logo Clean cover art, no logo
-               SteamGridDB → LaunchBox screenshot  (key optional)
+EXAMPLES
+    # Game logos + fanart backgrounds in one pass
+    python sync-covers.py --no-dry-run \
+        --roms ~/retro/roms --covers ~/retro/covers \
+        --backgrounds ~/retro/backgrounds \
+        --cover-style game-logo --sgdb-key YOUR_KEY
 
-  game-logo    Game title / logo art, no box
-               With key:  SteamGridDB → libretro → LaunchBox Clear Logo
-               No key:    libretro → LaunchBox Clear Logo
+    # European covers with orphan cleanup, single system
+    python sync-covers.py --no-dry-run --region europe --system snes \
+        --delete-orphans \
+        --roms ~/retro/roms/snes --covers ~/retro/covers/snes
 
-─────────────────────────────────────────────────────
- BACKGROUND STYLES  (--bg-style)
-─────────────────────────────────────────────────────
-  fanart       Hero art at 1920×1080  (default)
-               With key:  SteamGridDB Heroes → LaunchBox Fanart
-               No key:    LaunchBox Fanart-Background only
+    # Windows (use ^ for line continuation)
+    python sync-covers.py --no-dry-run ^
+        --roms "E:/tico/roms" --covers "E:/tico/assets/covers" ^
+        --cover-style game-logo --sgdb-key YOUR_KEY
 
-  boxart       Box art letterboxed to 1920×1080
-               libretro Named_Boxarts → LaunchBox Box-Front
+DEPENDENCIES
+    ImageMagick   Required for conversion and resizing.
+                  Windows: winget install ImageMagick.Q16-HDRI
+                  Linux:   sudo apt install imagemagick
 
-─────────────────────────────────────────────────────
- EXAMPLES
-─────────────────────────────────────────────────────
-  # First run — let the wizard guide you
-  python sync-covers.py
+    GitHub token  Raises API limit from 60 → 5 000 req/h.
+                  export GITHUB_TOKEN=ghp_xxxx  or  --github-token ghp_xxxx
 
-  # Download missing box-art covers (Linux/macOS)
-  python sync-covers.py --no-dry-run \
-      --roms ~/retro/roms --covers ~/retro/covers
-
-  # Game logos + fanart backgrounds in one pass (Linux/macOS)
-  python sync-covers.py --no-dry-run \
-      --roms ~/retro/roms --covers ~/retro/covers \
-      --backgrounds ~/retro/backgrounds \
-      --cover-style game-logo --sgdb-key YOUR_KEY
-
-  # Same on Windows (use ^ to continue lines)
-  python sync-covers.py --no-dry-run ^
-      --roms "E:/tico/roms" --covers "E:/tico/assets/covers" ^
-      --backgrounds "E:/tico/assets/backgrounds" ^
-      --cover-style game-logo --sgdb-key YOUR_KEY
-
-  # European covers; falls back to whatever region is available
-  python sync-covers.py --no-dry-run --region europe \
-      --roms ~/retro/roms --covers ~/retro/covers
-
-  # One system only (ROMs directly in the folder, not in subfolders)
-  python sync-covers.py --no-dry-run --system snes \
-      --roms ~/retro/roms/snes --covers ~/retro/covers/snes
-
-  # Remove covers that have no matching ROM
-  python sync-covers.py --no-dry-run --delete-orphans \
-      --roms ~/retro/roms --covers ~/retro/covers
-
-─────────────────────────────────────────────────────
- NOTES
-─────────────────────────────────────────────────────
-  GitHub token   Without one you get 60 API requests/hour (5 000 with).
-                 export GITHUB_TOKEN=ghp_xxxx  or  --github-token ghp_xxxx
-
-  SGDB key       Free at https://www.steamgriddb.com/profile/preferences
-                 export SGDB_KEY=YOUR_KEY  or  --sgdb-key YOUR_KEY
-
-  ImageMagick    Required for image conversion and resizing.
-                 Windows: winget install ImageMagick.Q16-HDRI
-                 Linux:   sudo apt install imagemagick
+    SGDB key      Free at https://www.steamgriddb.com/profile/preferences
+                  export SGDB_KEY=YOUR_KEY  or  --sgdb-key YOUR_KEY
 """
 
 
@@ -124,6 +89,7 @@ USE_COLOR = sys.stdout.isatty() and (
 )
 
 class C:
+    # Prefix "D" = bright/distinct variant of the base colour
     RESET   = _ansi(0)   if USE_COLOR else ""
     CYAN    = _ansi(36)  if USE_COLOR else ""
     GREEN   = _ansi(32)  if USE_COLOR else ""
@@ -310,6 +276,7 @@ _WORD_RE   = re.compile(r"\W+")       # word tokenizer for Jaccard scoring
 _WS_RE     = re.compile(r"\s+")       # whitespace collapser for strip_tags
 
 def strip_tags(name: str) -> str:
+    """Remove parenthesized/bracketed tags (region, revision, etc.) and collapse whitespace."""
     return _WS_RE.sub(" ", _TAG_RE.sub("", name)).strip()
 
 def normalize(name: str) -> str:
@@ -318,25 +285,25 @@ def normalize(name: str) -> str:
 
 def _similarity_prenorm(a_low: str, a_norm: str, b_low: str, b_norm: str) -> float:
     """Core similarity logic operating on pre-lowercased, pre-normalized strings."""
-    if a_low == b_low:                              return 1.00
-    if a_norm and a_norm == b_norm:                 return 0.95
-    if b_low  and a_low.startswith(b_low):          return 0.90
-    if b_norm and a_norm.startswith(b_norm):        return 0.88
+    if a_low == b_low:                              return 1.00  # exact match
+    if a_norm and a_norm == b_norm:                 return 0.95  # equal after tag/seq strip
+    if b_low  and a_low.startswith(b_low):          return 0.90  # raw prefix
+    if b_norm and a_norm.startswith(b_norm):        return 0.88  # normalized prefix
 
     shorter = a_norm if len(a_norm) <= len(b_norm) else b_norm
     longer  = b_norm if len(a_norm) <= len(b_norm) else a_norm
     containment_ok = len(shorter) >= 6 and len(shorter) >= len(longer) * 0.4
     if containment_ok:
-        if b_low  in a_low  or a_low  in b_low:    return 0.85
-        if b_norm in a_norm or a_norm in b_norm:    return 0.80
+        if b_low  in a_low  or a_low  in b_low:    return 0.85  # raw substring
+        if b_norm in a_norm or a_norm in b_norm:    return 0.80  # normalized substring
 
     words_a = {w for w in _WORD_RE.split(a_norm) if len(w) > 1}
     words_b = {w for w in _WORD_RE.split(b_norm) if len(w) > 1}
     if not words_a or not words_b:                  return 0.0
     common = len(words_a & words_b)
-    if common < 2:                                  return 0.0
+    if common < 2:                                  return 0.0   # require ≥2 shared words
     union = len(words_a | words_b)
-    return round(common / union, 4) if union else 0.0
+    return round(common / union, 4) if union else 0.0            # Jaccard index
 
 def similarity(a: str, b: str) -> float:
     """Public similarity score between two ROM/cover names (0.0–1.0).
@@ -348,7 +315,7 @@ def similarity(a: str, b: str) -> float:
     )
 
 PNG_SIGNATURE  = b'\x89PNG\r\n\x1a\n'
-WEBP_SIGNATURE = b'WEBP'  # bytes 8-12 of a WebP file (after RIFF + 4-byte size)
+WEBP_SIGNATURE = b'WEBP'  # bytes 8-11 of a WebP file (after RIFF + 4-byte little-endian size)
 
 def is_valid_png(data: bytes) -> bool:
     """Check PNG magic bytes -- fast, zero cost, no dependencies."""
@@ -358,8 +325,6 @@ def is_webp(data: bytes) -> bool:
     """Check WebP magic bytes (RIFF....WEBP)."""
     return len(data) >= 12 and data[8:12] == WEBP_SIGNATURE
 
-# Pre-normalized candidate list: list of (original_name, normalized_name) tuples.
-# Build once per repo with build_normalized_candidates(), pass to ranked_matches().
 def build_normalized_candidates(candidates: list[str]) -> list[tuple[str, str]]:
     """Pre-compute normalized form of every repo filename. Call once per system."""
     return [(c, normalize(c).lower()) for c in candidates]
@@ -383,7 +348,7 @@ def ranked_matches(rom: str, candidates: list[str],
         if score >= threshold:
             results.append((orig, score))
             if score == 1.0:
-                break  # OPTI B: exact match, no point scanning further
+                break  # exact match — no better score possible
 
     return sorted(results, key=lambda x: x[1], reverse=True)[:top_n]
 
@@ -445,9 +410,9 @@ def batch_identify(magick: str, jpg_list: list[Path],
     return dims_map
 
 # =============================================================================
-# STEAMGRIDDB  --  clean fan-art covers (no console/game logo overlay)
-# API docs: https://www.steamgriddb.com/api/v2
-# Requires a free API key: https://www.steamgriddb.com/profile/preferences
+# STEAMGRIDDB — grids (covers), logos, and hero images (backgrounds)
+# API docs : https://www.steamgriddb.com/api/v2
+# Free key : https://www.steamgriddb.com/profile/preferences
 # =============================================================================
 def _sgdb_get_json(url: str, key: str, context: str = "") -> dict | None:
     """Fetch a SGDB JSON endpoint. Returns parsed dict or None on any error."""
@@ -578,16 +543,16 @@ def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
                     if norm:
                         db_id_to_norm[db_id] = norm
 
-            # GameImage entries
+            # Index the four image types we care about
+            _INDEXED_TYPES = (
+                _LBDB_TYPE_COVER, _LBDB_TYPE_BG,
+                _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
+            )
             for img in root.iter("GameImage"):
                 db_id    = (img.findtext("DatabaseID") or "").strip()
                 filename = (img.findtext("FileName") or "").strip()
                 img_type = (img.findtext("Type") or "").strip()
                 region   = (img.findtext("Region") or "").strip().lower()
-                _INDEXED_TYPES = (
-                    _LBDB_TYPE_COVER, _LBDB_TYPE_BG,
-                    _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
-                )
                 if not (db_id and filename and img_type in _INDEXED_TYPES):
                     continue
                 norm = db_id_to_norm.get(db_id)
@@ -798,7 +763,6 @@ def get_repo_file_list(repo: str, token: str | None,
     folder_tag = "logos" if folder_name == "Named_Logos" else "boxarts"
     cache_path = script_dir / f"{script_stem}_{repo}_{folder_tag}.json"
 
-    # Try disk cache first
     if cache_path.exists():
         try:
             data = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -815,7 +779,6 @@ def get_repo_file_list(repo: str, token: str | None,
         except Exception:
             cprint(C.GRAY, f"  Cache unreadable for {repo} -- re-fetching")
 
-    # Fetch from GitHub Trees API
     cprint(C.GRAY, f"  Fetching file list from GitHub API: {repo} ...")
     url = f"{BASE_API_URL}/{repo}/git/trees/master?recursive=1"
     try:
@@ -1484,8 +1447,6 @@ def _download_bg_boxart(
 ) -> None:
     """Download backgrounds using box art (libretro Named_Boxarts → LaunchBox Box-Front).
     Images are letterboxed to 1920x1080 by _write_and_convert.
-    Shares the same matching + fallback logic as covers, only the output
-    path, dimensions, and progress label differ.
     """
     cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} background(s) via box art (libretro + LaunchBox)...")
 
@@ -1752,13 +1713,14 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
                "Install it to enable PNG→JPG conversion.")
         return
 
+    lb_idx = lb_index or {}  # resolved once; used by all three cover styles below
+
     if cfg.cover_style == "without_logo":
         _download_clean_covers(roms_to_dl, covers_path, folder, cfg, counters,
                                failed_covers, lb_index=lb_idx)
         return
 
     # with_logo / game_logo: libretro-thumbnails primary, LB + optional SGDB fallbacks.
-    lb_idx = lb_index or {}   # hoisted: needed by both the early-exit and normal paths
     if cfg.cover_style == "game_logo":
         _lb_folder, _sgdb_fn, _lb_fallback = (
             "Named_Logos", sgdb_get_logo_url, lbdb_find_logo_url)
@@ -2619,7 +2581,7 @@ def _wiz_cover_options(
             preferred_region = {"1":"any","2":"usa","3":"europe","4":"japan","5":"world"}[region_ch]
             print()
             if cover_style == "game_logo":
-                # SGDB logos are a tertiary fallback for game_logo — key is optional
+                # SGDB is the primary source for game_logo when a key is set
                 sgdb_key = _prompt_sgdb_key(sgdb_key, required=False) or ""
                 print()
         else:
@@ -2929,7 +2891,6 @@ def main() -> None:
     # CLI mode: all args provided on command line
     # ------------------------------------------------------------------
 
-    # Duplicate detection
     if args.check_duplicates:
         roms_raw = args.roms.strip().strip('"') or prompt_path("ROMs root")
         roms_base = Path(roms_raw)
@@ -2967,7 +2928,6 @@ def main() -> None:
     sgdb_key         = args.sgdb_key or None
     delete_orphans   = args.delete_orphans
 
-    # Determine task
     if covers_base and bgs_base:
         task = "both"
     elif bgs_base:
@@ -2975,7 +2935,6 @@ def main() -> None:
     else:
         task = "covers"
 
-    # System detection
     common, single_system = _detect_systems(roms_base, args.system)
     if single_system and not common:
         common = [prompt_system()]
@@ -2983,12 +2942,10 @@ def main() -> None:
         cprint(C.RED, f"  No ROM subfolders found in: {roms_base}")
         sys.exit(1)
 
-    # Create dirs
     for base, label in [(covers_base, "covers"), (bgs_base, "backgrounds")]:
         if base:
             _ensure_art_dir(base, label, dry_run)
 
-    # Banner
     print()
     cprint(C.CYAN, "=============================================")
     cprint(C.CYAN, "  sync-covers.py  (CLI mode)")
