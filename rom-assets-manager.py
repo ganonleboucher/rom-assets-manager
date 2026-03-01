@@ -38,6 +38,7 @@ import zipfile
 import zlib
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from typing import IO, TextIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,10 +123,11 @@ class ReportTee:
             _print_summary(...)
         print(f"  Report saved to: {tee.path}")
     """
+    _orig: TextIO
+    _fh:   IO[str]
+
     def __init__(self, path: Path):
-        self.path  = path
-        self._orig = None
-        self._fh   = None
+        self.path = path
 
     def __enter__(self):
         self._orig = sys.stdout
@@ -1033,7 +1035,7 @@ def _http_get(url: str, token: str | None, bearer: bool = False,
                 return resp.read()
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                wait = int(e.headers.get("Retry-After", 2 ** attempt))
+                wait = int(e.headers.get("Retry-After") or 2 ** attempt)
                 cprint(C.YELLOW, f"  Rate limited (HTTP 429), waiting {wait}s...")
                 time.sleep(wait)
                 last_exc = e
@@ -1506,6 +1508,8 @@ def _download_covers_without_logo(
             cprint(C.MAGENTA, f"  [DRY RUN] QUEUED (clean cover)  '{rom_stem}'")
         return
 
+    magick = cfg.magick
+    assert magick  # non-None guaranteed — caller guards with `if not cfg.magick: return`
     cprint(C.CYAN, f"  Downloading {len(roms_to_dl)} cover(s) via {source_desc}...")
     print_lock = threading.Lock()
     tracker    = _ProgressTracker(len(roms_to_dl), label="Downloading ")
@@ -1526,7 +1530,7 @@ def _download_covers_without_logo(
             return
         try:
             raw = _http_get(url, None, timeout=cfg.http_timeout)
-            _write_and_convert(raw, covers_path, rom_stem, jpg_path, cfg.magick, counters)
+            _write_and_convert(raw, covers_path, rom_stem, jpg_path, magick, counters)
             _progress_ok(tracker, print_lock, f"  OK  {rom_stem}")
         except Exception as e:
             tracker.tick()
@@ -1584,6 +1588,8 @@ def _download_art_batch(
     """
     _direct = direct_roms or []
     lb_idx  = lb_index or {}
+    magick  = cfg.magick
+    assert magick  # non-None guaranteed — caller guards with `if not cfg.magick: return`
     cprint(C.CYAN, f"  Downloading {len(matches) + len(_direct)} cover(s)...")
     print_lock = threading.Lock()
     tracker    = _ProgressTracker(len(matches) + len(_direct), label="Downloading ")
@@ -1602,7 +1608,7 @@ def _download_art_batch(
                     try:
                         raw = _http_get(sgdb_url, None, timeout=cfg.http_timeout)
                         _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                           cfg.magick, counters, dims=dims, gravity=gravity)
+                                           magick, counters, dims=dims, gravity=gravity)
                         _progress_ok(tracker, print_lock, f"  OK (SGDB)  {rom_stem}")
                         return
                     except Exception as e:
@@ -1629,7 +1635,7 @@ def _download_art_batch(
 
             try:
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                   cfg.magick, counters, dims=dims, gravity=gravity)
+                                   magick, counters, dims=dims, gravity=gravity)
             except subprocess.CalledProcessError:
                 with print_lock:
                     cprint(C.YELLOW,
@@ -1650,7 +1656,7 @@ def _download_art_batch(
             try:
                 raw = _http_get(_fallback_url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                   cfg.magick, counters, dims=dims, gravity=gravity)
+                                   magick, counters, dims=dims, gravity=gravity)
                 _progress_ok(tracker, print_lock, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as lbe:
@@ -1679,7 +1685,7 @@ def _download_art_batch(
             try:
                 raw = _http_get(url, None, timeout=cfg.http_timeout)
                 _write_and_convert(raw, covers_path, rom_stem, jpg_path,
-                                   cfg.magick, counters, dims=dims, gravity=gravity)
+                                   magick, counters, dims=dims, gravity=gravity)
                 _progress_ok(tracker, print_lock, f"  OK (fallback)  {rom_stem}")
                 return
             except Exception as e:
@@ -1723,6 +1729,8 @@ def _download_bg_images(
             cprint(C.MAGENTA, f"  [DRY RUN] QUEUED ({source_label})  '{rom_stem}'")
         return
 
+    magick     = cfg.magick
+    assert magick  # non-None guaranteed — caller guards with `if not cfg.magick: return`
     print_lock = threading.Lock()
     tracker    = _ProgressTracker(len(roms_to_dl), label="Backgrounds")
     lb_idx     = lb_index or {}
@@ -1771,7 +1779,7 @@ def _download_bg_images(
 
         try:
             raw = _http_get(hero_url, None, timeout=cfg.http_timeout)
-            _write_and_convert(raw, bgs_path, rom_stem, jpg_path, cfg.magick, bg_counters,
+            _write_and_convert(raw, bgs_path, rom_stem, jpg_path, magick, bg_counters,
                                dims="1920x1080")
             _progress_ok(tracker, print_lock, f"  OK  {rom_stem}")
         except Exception as e:
@@ -3103,6 +3111,7 @@ def _resize_pass(
     """Resize all JPGs under base that aren't already the target size."""
     if not cfg.magick:
         return
+    magick = cfg.magick  # narrowed to str after the guard above
     if valid_dims is None:
         valid_dims = frozenset({target_dims})
     all_jpgs = list({                               # set() deduplicates on
@@ -3135,7 +3144,7 @@ def _resize_pass(
 
     def resize_one(jpg: Path):
         try:
-            magick_resize(cfg.magick, str(jpg), str(jpg), dims=target_dims, gravity=gravity)
+            magick_resize(magick, str(jpg), str(jpg), dims=target_dims, gravity=gravity)
             counters.inc("converted")
             _progress_ok(tracker, print_lock, f"  RESIZED  {jpg}", color=C.DCYAN)
         except Exception as e:
@@ -3538,7 +3547,7 @@ def _wiz_cover_options(
     # - without_logo        : already prompted (optional) → skip
     # - game_logo           : already prompted (optional) → skip
     if need_bgs and not sgdb_key and cover_style == "with_logo" and bg_style == "fanart":
-        sgdb_key = _prompt_sgdb_key(sgdb_key)
+        sgdb_key = _prompt_sgdb_key(sgdb_key) or ""
         print()
 
     return cover_style, preferred_region, sgdb_key, bg_style
