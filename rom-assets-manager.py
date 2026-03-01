@@ -3194,6 +3194,7 @@ def check_completeness(
         target_total  = len(target_games),
         script_dir    = script_dir,
         want_list     = want_list,
+        system_name   = rom_dir.name,
     )
 
 
@@ -3208,12 +3209,20 @@ def _report_completeness(
     target_total: int,
     script_dir:   Path,
     want_list:    bool,
+    system_name:  str = "",
 ) -> None:
     """Write CSV report + optional want-list, then print a terminal summary."""
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = script_dir / f"completeness_{ts}.csv"
+    ts          = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Sanitise system_name for use in a filename: keep only alphanumeric, dash, underscore.
+    safe_system = re.sub(r"[^\w\-]", "_", system_name).strip("_") if system_name else ""
+    stem        = f"completeness_{safe_system}_{ts}" if safe_system else f"completeness_{ts}"
+    csv_path    = script_dir / f"{stem}.csv"
     wl_path: Path | None = (
-        script_dir / f"wantlist_{ts}.txt" if want_list else None
+        script_dir / f"wantlist_{safe_system}_{ts}.txt"
+        if want_list and safe_system
+        else script_dir / f"wantlist_{ts}.txt"
+        if want_list
+        else None
     )
 
     # ── CSV ──────────────────────────────────────────────────────────────────
@@ -3821,9 +3830,10 @@ def _wizard(
     # ── 1. What do you want to do? ────────────────────────────────────
     task_ch = prompt_choice("  What would you like to do?", {
         "1": f"{C.GREEN}Check duplicate ROMs{C.RESET}",
-        "2": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
-        "3": f"{C.CYAN}Download covers only{C.RESET}",
-        "4": f"{C.CYAN}Download backgrounds only{C.RESET}",
+        "2": f"{C.YELLOW}Check ROM set completeness{C.RESET}",
+        "3": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
+        "4": f"{C.CYAN}Download covers only{C.RESET}",
+        "5": f"{C.CYAN}Download backgrounds only{C.RESET}",
         "h": f"{C.GRAY}Help — show usage, cover styles, options{C.RESET}",
     })
     print()
@@ -3834,9 +3844,58 @@ def _wizard(
         print(__doc__)
         sys.exit(0)
 
-    need_covers = task_ch in ("2", "3")
-    need_bgs    = task_ch in ("2", "4")
-    is_dup      = task_ch == "1"
+    need_covers     = task_ch in ("3", "4")
+    need_bgs        = task_ch in ("3", "5")
+    is_dup          = task_ch == "1"
+    is_completeness = task_ch == "2"
+
+    # ── Completeness check (early exit — single folder + DAT, no system detection) ──
+    if is_completeness:
+        cprint(C.CYAN, _SECTION)
+        cprint(C.CYAN, "  ROM set completeness")
+        cprint(C.CYAN, _SECTION)
+        print()
+        cprint(C.GRAY, "  DAT files can be downloaded from: https://dat-o-matic.no-intro.org")
+        print()
+
+        rom_dir  = Path(prompt_path("ROM folder (single system)"))
+        print()
+        dat_path = Path(prompt_path("No-Intro DAT file"))
+        if not dat_path.is_file():
+            cprint(C.RED, f"  DAT file not found: '{dat_path}'")
+            sys.exit(1)
+        print()
+
+        cprint(C.CYAN, _SECTION)
+        cprint(C.CYAN, "  Region mode")
+        cprint(C.CYAN, _SECTION)
+        print()
+        region_ch = prompt_choice("  Which releases to check against?", {
+            "1": f"{C.GREEN}USA / North America{C.RESET}      — games released in USA or World  (1G1R)",
+            "2": f"{C.CYAN}Europe{C.RESET}                   — games released in Europe or World  (1G1R)",
+            "3": f"{C.YELLOW}Japan exclusives{C.RESET}         — games never released in USA or Europe",
+            "4": f"{C.YELLOW}Japan (full){C.RESET}             — all Japanese releases incl. JP versions of western games  (1G1R)",
+            "5": f"{C.GRAY}Full set{C.RESET}                 — all regions, all variants (no 1G1R filter)",
+        })
+        region_mode = {"1": "usa", "2": "europe", "3": "japan_exclusive",
+                       "4": "japan", "5": "all"}[region_ch]
+        print()
+
+        want_ch = prompt_choice("  Save a want-list of missing titles?", {
+            "y": f"{C.GREEN}Yes{C.RESET} — write a plain-text list of missing ROMs alongside the CSV",
+            "n": f"{C.GRAY}No{C.RESET}",
+        })
+        want_list = want_ch == "y"
+        print()
+
+        check_completeness(
+            dat_path    = dat_path,
+            rom_dir     = rom_dir,
+            region_mode = region_mode,
+            script_dir  = script_dir,
+            want_list   = want_list,
+        )
+        sys.exit(0)
 
     # ── 2. ROMs path (always) ─────────────────────────────────────────
     cprint(C.CYAN, _SECTION)
@@ -3923,9 +3982,9 @@ def _wizard(
 
     # ── 12. Confirm ───────────────────────────────────────────────────
     task_label = {
-        "2": "covers + backgrounds",
-        "3": "covers only",
-        "4": "backgrounds only",
+        "3": "covers + backgrounds",
+        "4": "covers only",
+        "5": "backgrounds only",
     }[task_ch]
 
     confirm_opts = _wiz_build_confirm_opts(
