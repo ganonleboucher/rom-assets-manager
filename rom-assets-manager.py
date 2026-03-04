@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import functools
 import getpass
 import hashlib
 import io
@@ -43,6 +44,9 @@ from typing import IO, TextIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Aliases wired up after the name-based dedup helpers section below.
+_COMPANION_TOOLS = True
 
 # =============================================================================
 # ANSI COLOURS  (auto-disabled when not supported)
@@ -600,6 +604,22 @@ def normalize(name: str) -> str:
     and lives entirely in check_duplicates(), which never calls this function.
     """
     return _SEQNUM_RE.sub("", strip_tags(name)).strip()
+
+_ARTICLE_TRAIL_RE = re.compile(r',\s*(?:the|a|an)$', re.IGNORECASE)
+_ARTICLE_LEAD_RE  = re.compile(r'^(?:the|a|an)\s+',  re.IGNORECASE)
+
+def _norm_for_dedup(stem: str) -> str:
+    """Normalize a ROM stem for same-title grouping in duplicate detection.
+
+    Unlike normalize() (cover-art lookup), this also strips leading/trailing
+    articles so that 'The Legend of Zelda' and 'Legend of Zelda, The' map to
+    the same key and get grouped as potential same-title duplicates.
+    """
+    s = strip_tags(stem)               # strip (USA), (Rev A), [!], etc.
+    s = _SEQNUM_RE.sub("", s)         # strip trailing _1, _2 copy numbers
+    s = _ARTICLE_TRAIL_RE.sub("", s)  # "Legend of Zelda, The" -> "Legend of Zelda"
+    s = _ARTICLE_LEAD_RE.sub("", s)   # "The Legend of Zelda"  -> "Legend of Zelda"
+    return s.strip().lower()
 
 def _similarity_prenorm(a_low: str, a_norm: str, b_low: str, b_norm: str) -> float:
     """Core similarity logic operating on pre-lowercased, pre-normalized strings."""
@@ -1345,11 +1365,15 @@ def _reconcile_art_files(
     counters: Counters,
     orphans: list[str],
     kind: str = "cover",
+    dims: str = "512x512",
+    gravity: str = "center",
 ) -> bool:
     """Fuzzy-rename cover/background files to match ROM stems.
     Modifies `existing` in-place for successful renames.
     Returns True if any rename occurred (caller should re-read the directory).
     `kind` is used in log messages: "cover" or "background".
+    Renamed files are resized to `dims` immediately so _resize_pass only acts
+    as a safety net for files added outside this tool.
     """
     mismatched = [s for s in existing if s not in roms]
     did_rename  = False
@@ -1367,6 +1391,12 @@ def _reconcile_art_files(
                     print(f"  {C.YELLOW}RENAME{C.RESET}  '{stem}'{path.suffix}"
                           f"  ->  '{new_name}'  (score: {score:.2f})")
                     shutil.move(str(path), str(new_path))  # shutil.move handles cross-filesystem moves; path.rename does not
+                    if cfg.magick:
+                        try:
+                            magick_resize(cfg.magick, str(new_path), str(new_path),
+                                          dims=dims, gravity=gravity)
+                        except Exception:
+                            pass  # resize failure is non-fatal; _resize_pass will catch it
                     existing.pop(stem)
                     existing[name] = new_path
                     counters.inc("renamed")
@@ -1831,7 +1861,8 @@ def process_folder(folder: str, roms_path: Path, covers_path: Path,
     )
 
     # Step 1 — fuzzy-rename mismatched covers
-    if _reconcile_art_files(covers, roms, covers_path, cfg, counters, orphans):
+    if _reconcile_art_files(covers, roms, covers_path, cfg, counters, orphans,
+                            dims="512x512", gravity="center"):
         covers = {p.stem: p for p in covers_path.iterdir() if p.is_file()}
 
     # Step 2 — downloads
@@ -1974,8 +2005,9 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
     )
 
     # Step 1 — fuzzy-rename mismatched backgrounds
+    bg_gravity = "East" if cfg.bg_style == "boxart" else "center"
     if _reconcile_art_files(bgs, roms, bgs_path, cfg, bg_counters, bg_orphans,
-                          kind="background"):
+                            kind="background", dims="1920x1080", gravity=bg_gravity):
         bgs = {p.stem: p for p in bgs_path.iterdir() if p.is_file()}
 
     # Step 2 — downloads
@@ -2080,6 +2112,296 @@ ROM_EXTENSIONS = {
     ".rom",                          # generic cartridge dump
 }
 
+# =============================================================================
+# NAME-BASED DEDUPLICATION & FILENAME NORMALISATION
+# =============================================================================
+
+# ── normalize_roms helpers ────────────────────────────────────────────────────
+
+_NRM_ARTICLE_RE = re.compile(r',\s*(The|A|An)$', re.IGNORECASE)
+_NRM_DISC_RE    = re.compile(r'[\(\[](Disc|Disk|CD)\s*\d+[\)\]]', re.IGNORECASE)
+
+def normalize_filename(filename: str) -> str:
+    """Return a clean-titled version of a ROM filename.
+    Strips all parenthetical/bracketed tags except disc number.
+    Moves trailing articles to the front: 'Zelda, The' -> 'The Zelda'.
+    """
+    base, ext = os.path.splitext(filename)
+    base = re.sub(r'_\d+$', '', base)
+    base = re.sub(r"_s\b", "'s", base, flags=re.IGNORECASE)
+    base = base.replace('_', ' ')
+    disc_match = _NRM_DISC_RE.search(base)
+    disc_tag   = f" {disc_match.group(0)}" if disc_match else ""
+    title = re.split(r'\s*[\(\[]', base)[0].strip()
+    m = _NRM_ARTICLE_RE.search(title)
+    if m:
+        title = m.group(1) + ' ' + title[:m.start()].strip()
+    title = re.sub(r'  +', ' ', title).strip()
+    return title + disc_tag + ext
+
+def collect_renames(folder_path: str) -> list[tuple[str, str]]:
+    """Walk folder and return list of (old_path, new_path) where name changed."""
+    renames = []
+    for dirpath, _, filenames in os.walk(folder_path):
+        for filename in filenames:
+            new_name = normalize_filename(filename)
+            if new_name != filename:
+                renames.append((
+                    os.path.join(dirpath, filename),
+                    os.path.join(dirpath, new_name),
+                ))
+    return renames
+
+# ── dedupe_roms helpers ───────────────────────────────────────────────────────
+
+# Tags that mark obviously inferior copies (GoodTools conventions + common).
+_DEDUP_DEFAULT_EXCLUDES: list[str] = ["Demo", "Beta", "Proto", "b", "o", "h", "t"]
+
+# File extensions that are never ROMs — skipped during name-based grouping.
+_DEDUP_NON_ROM_EXTS: frozenset[str] = frozenset({
+    '.sav', '.srm', '.state', '.sta',
+    '.ss0', '.ss1', '.ss2', '.ss3', '.ss4', '.ss5', '.ss6', '.ss7', '.ss8', '.ss9',
+    '.png', '.jpg', '.jpeg', '.bmp',
+    '.xml', '.json', '.dat', '.txt',
+    '.m3u',
+})
+
+# Generation families: systems in the same family share many multiplatform titles.
+_DEDUP_DEFAULT_FAMILIES: dict[str, list[str]] = {
+    "8bit":      ["NES", "SMS", "MasterSystem", "Famicom"],
+    "16bit":     ["SegaGenesis", "Genesis", "MegaDrive", "SNES", "SuperNintendo", "PCEngine", "TG16"],
+    "handhelds": ["GB", "GBC", "GBA", "GameBoy", "GameGear", "Lynx"],
+    "32bit":     ["PlayStation", "PSX", "PS1", "Saturn", "SegaSaturn", "N64", "Nintendo64"],
+    "128bit":    ["PS2", "GameCube", "GCN", "Xbox", "Dreamcast", "SDC"],
+}
+
+def detect_family(system_name: str,
+                  families: dict[str, list[str]] | None = None) -> tuple[str | None, list[str]]:
+    """Return (family_name, member_list) for the given system, or (None, [])."""
+    if families is None:
+        families = _DEDUP_DEFAULT_FAMILIES
+    name_lower = system_name.lower()
+    for family, members in families.items():
+        if any(m.lower() == name_lower for m in members):
+            return family, members
+    return None, []
+
+def normalize_basename(filename: str) -> str:
+    """Normalize a ROM filename to a bare title key for grouping.
+    Strips extension, all tags, leading/trailing articles, lowercases.
+    e.g. 'Aladdin (USA) (Rev A).gbc' -> 'aladdin'
+    """
+    return _norm_for_dedup(os.path.splitext(filename)[0])
+
+def get_files_by_basename(folder_path: str) -> dict[str, list[str]]:
+    """Group files in a folder (recursively) by normalized base name."""
+    groups: dict[str, list[str]] = defaultdict(list)
+    for dirpath, _, filenames in os.walk(folder_path):
+        for filename in filenames:
+            if os.path.splitext(filename)[1].lower() in _DEDUP_NON_ROM_EXTS:
+                continue
+            groups[normalize_basename(filename)].append(
+                os.path.join(dirpath, filename)
+            )
+    return groups
+
+def find_name_duplicates(folder_path: str) -> dict[str, list[str]]:
+    """Return groups of files sharing the same base name within a folder."""
+    return {k: v for k, v in get_files_by_basename(folder_path).items() if len(v) > 1}
+
+@functools.lru_cache(maxsize=64)
+def _dedup_tag_pattern(tag: str) -> re.Pattern:
+    return re.compile(
+        r'[\(\[][^\)\]]*\b' + re.escape(tag) + r'[^\)\]]*[\)\]]', re.IGNORECASE
+    )
+
+def _dedup_matches_tag(filename: str, tag: str) -> bool:
+    return bool(_dedup_tag_pattern(tag).search(filename))
+
+def _dedup_auto_pick(paths: list[str], preferences: list[str]) -> str | None:
+    """Return the first file matching a preference tag (in priority order), or None."""
+    for pref in preferences:
+        for path in paths:
+            if _dedup_matches_tag(os.path.basename(path), pref):
+                return path
+    return None
+
+def _dedup_filter_excluded(paths: list[str], excludes: list[str]) -> list[str]:
+    return [p for p in paths if not any(_dedup_matches_tag(os.path.basename(p), ex)
+                                        for ex in excludes)]
+
+def _dedup_is_multidisc(paths: list[str]) -> bool:
+    """True if every file has a distinct disc/cd number tag — not a real duplicate."""
+    pattern = re.compile(r'[\(\[](Disc|Disk|CD)\s*\d+[\)\]]', re.IGNORECASE)
+    tags = [pattern.search(os.path.basename(p)) for p in paths]
+    if not all(tags):
+        return False
+    return len({t.group(0).lower() for t in tags if t}) == len(paths)  # type: ignore[union-attr]
+
+def _dedup_path_label(path: str, use_label: bool) -> str:
+    """Format a file path for display: '[parentfolder] filename' or just 'filename'."""
+    if use_label:
+        return f"[{os.path.basename(os.path.dirname(path))}] {os.path.basename(path)}"
+    return os.path.basename(path)
+
+def _dedup_ask_ext(extensions: list[str]) -> str | None:
+    """Ask once which extension to keep. Returns None if skipped."""
+    ext_list = sorted(extensions)
+    for i, ext in enumerate(ext_list, 1):
+        print(f"  [{i}] {ext}")
+    while True:
+        choice = input(f"  Keep which extension? (1-{len(ext_list)}, s=skip): ").strip().lower()
+        if choice == 's':
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(ext_list):
+            return ext_list[int(choice) - 1]
+        print("  Invalid choice.")
+
+def _dedup_ask_keep(paths: list[str], preferences: list[str] | None = None,
+                    use_label: bool = False) -> str | None:
+    """Try preference auto-pick first, then ask interactively."""
+    name_fn = functools.partial(_dedup_path_label, use_label=use_label)
+    if preferences:
+        pick = _dedup_auto_pick(paths, preferences)
+        if pick:
+            print(f"  Auto-selected (preference): {name_fn(pick)}")
+            return pick
+    for i, path in enumerate(paths, 1):
+        print(f"  [{i}] {name_fn(path)}")
+    while True:
+        choice = input(f"  Keep which file? (1-{len(paths)}, s=skip): ").strip().lower()
+        if choice == 's':
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(paths):
+            return paths[int(choice) - 1]
+        print("  Invalid choice.")
+
+def _dedup_delete_files(paths: list[str], total: int,
+                        use_label: bool = False) -> int:
+    name_fn = functools.partial(_dedup_path_label, use_label=use_label)
+    for path in paths:
+        print(f"  Deleting: {name_fn(path)}")
+        try:
+            os.remove(path)
+            total += 1
+        except PermissionError:
+            print(f"  ERROR (permission denied): {name_fn(path)}")
+        except OSError as e:
+            print(f"  ERROR: {name_fn(path)} — {e}")
+    return total
+
+def delete_name_duplicates(
+    duplicates: dict[str, list[str]],
+    dry_run: bool = True,
+    preferences: list[str] | None = None,
+    excludes: list[str] | None = None,
+    ext_preference: dict | None = None,
+    use_label: bool = False,
+    keep_from: str | None = None,
+) -> int:
+    """Interactive per-group deletion for name-based duplicate groups."""
+    total = 0
+    if ext_preference is None:
+        ext_preference = {}
+    name_fn = functools.partial(_dedup_path_label, use_label=use_label)
+
+    for base_name, paths in sorted(duplicates.items()):
+        print(f"\n[{base_name}]")
+
+        if _dedup_is_multidisc(paths):
+            for p in paths:
+                print(f"  Multi-disc: {name_fn(p)}")
+            print("  Skipped (multi-disc set).")
+            continue
+
+        if keep_from and not dry_run:
+            to_delete = [p for p in paths
+                         if not os.path.abspath(p).startswith(os.path.abspath(keep_from))]
+            to_keep   = [p for p in paths if p not in to_delete]
+            if to_delete:
+                total = _dedup_delete_files(to_delete, total, use_label)
+            for p in to_keep:
+                print(f"  Kept:     {name_fn(p)}")
+            continue
+
+        if dry_run:
+            for p in paths:
+                print(f"  {name_fn(p)}")
+            continue
+
+        # Remove excluded files from candidates
+        if excludes:
+            valid    = _dedup_filter_excluded(paths, excludes)
+            excluded = [p for p in paths if p not in valid]
+            if not valid:
+                total = _dedup_delete_files(excluded, total, use_label)
+                continue
+            if excluded:
+                total = _dedup_delete_files(excluded, total, use_label)
+                if len(valid) == 1:
+                    print(f"  Kept:     {name_fn(valid[0])}")
+                    continue
+                paths = valid
+
+        # Group by extension
+        by_ext: dict[str, list[str]] = defaultdict(list)
+        for p in paths:
+            by_ext[os.path.splitext(p)[1].lower()].append(p)
+        extensions = set(by_ext.keys())
+
+        if len(extensions) > 1:
+            pref_pick = _dedup_auto_pick(paths, preferences) if preferences else None
+            if pref_pick:
+                keep_ext = os.path.splitext(pref_pick)[1].lower()
+                print(f"  Auto-selected (preference): {name_fn(pref_pick)}")
+            else:
+                ext_key = frozenset(extensions)
+                if ext_key not in ext_preference:
+                    print(f"  Conflict: {', '.join(name_fn(p) for p in paths)}")
+                    ext_preference[ext_key] = _dedup_ask_ext(list(extensions))
+                keep_ext = ext_preference[ext_key]
+
+            if keep_ext is None:
+                print("  Skipped.")
+                continue
+
+            to_keep   = by_ext[keep_ext]
+            to_delete = [p for ext, ps in by_ext.items() if ext != keep_ext for p in ps]
+            total = _dedup_delete_files(to_delete, total, use_label)
+
+            if len(to_keep) > 1:
+                print(f"  Multiple {keep_ext} files remain, pick one:")
+                keep = _dedup_ask_keep(to_keep, preferences, use_label)
+                if keep:
+                    total = _dedup_delete_files([p for p in to_keep if p != keep],
+                                                total, use_label)
+                    print(f"  Kept:     {name_fn(keep)}")
+                else:
+                    print("  Skipped.")
+            else:
+                print(f"  Kept:     {name_fn(to_keep[0])}")
+        else:
+            print(f"  Same extension ({list(extensions)[0]}), pick one:")
+            keep = _dedup_ask_keep(paths, preferences, use_label)
+            if keep is None:
+                print("  Skipped.")
+                continue
+            total = _dedup_delete_files([p for p in paths if p != keep], total, use_label)
+            print(f"  Kept:     {name_fn(keep)}")
+
+    return total
+
+# ── companion aliases (used by wizard tasks 6 / 7 / 8) ───────────────────────
+_companion_normalize_filename = normalize_filename
+_companion_collect_renames    = collect_renames
+_companion_get_files_by_base  = get_files_by_basename
+_companion_find_dupes         = find_name_duplicates
+_companion_delete_dupes       = delete_name_duplicates
+_companion_detect_family      = detect_family
+_companion_DEFAULT_FAMILIES   = _DEDUP_DEFAULT_FAMILIES
+_companion_DEFAULT_EXCLUDES   = _DEDUP_DEFAULT_EXCLUDES
+
+# =============================================================================
 # Multi-track disc dumps (.bin/.cue) contain CDDA audio tracks alongside the
 # data track. Audio tracks are named "… (Track N).bin" or "… Track N.bin".
 # They are raw PCM and can be byte-identical across different games (same-
@@ -2175,7 +2497,7 @@ def _build_suspected(all_rom_files: list[Path],
             continue
         if p.suffix.lower() in _SIDECAR_EXTS:
             continue
-        norm_name = normalize(p.stem).lower().strip()
+        norm_name = _norm_for_dedup(p.stem)
         if not norm_name:
             continue
         key = (norm_name, p.suffix.lower())
@@ -2445,7 +2767,10 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
         for group in sorted(suspected, key=lambda g: g[0]):
             cprint(C.DYELLOW, f"\n  '{normalize(group[0].stem)}'")
             for p in group:
-                sz = p.stat().st_size if p.exists() else 0
+                try:
+                    sz = p.stat().st_size
+                except OSError:
+                    sz = 0
                 cprint(C.YELLOW, f"    - {p.name}  ({sz:,} bytes)")
         print()
 
@@ -2496,11 +2821,46 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
 # Keep-strategy sort keys — operate on plain Path objects.
 # Each returns (primary_sort_key, name) so the first element after sorting
 # is the file to KEEP.
+#
+# Region priority for strategy 5: lower rank = preferred (kept first).
+# Mirrors the region-preference logic already used for cover-art lookup.
+_REGION_KEEP_PRIORITY: dict[str, int] = {
+    "usa":    0,   # North America — most complete localised release
+    "world":  1,   # Multi-region release
+    "europe": 2,
+    "japan":  3,
+}
+
+def _region_keep_key(p: Path) -> tuple:
+    r = region_of(p.name) or ""
+    rank = _REGION_KEEP_PRIORITY.get(r, 99)   # unknown region = last
+    return (rank, len(p.name), p.name)
+
+# Tags that always identify an inferior ROM when a clean copy exists in the
+# same group.  Matched case-insensitively inside any (...) or [...] tag.
+# Sourced from GoodTools conventions + No-Intro common tags.
+_BAD_TAG_RE = re.compile(
+    r'[\(\[]\s*(?:Beta|Demo|Proto(?:type)?|Sample|Hack|b|h|t|o)\s*[\d.]*\s*[\)\]]',
+    re.IGNORECASE,
+)
+
+def _split_bad_tags(group: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Return (clean, bad) splitting the group on _BAD_TAG_RE.
+    If ALL files are bad-tagged, everything is returned as clean (keep them
+    all for manual review — nothing obviously superior to keep).
+    """
+    clean = [p for p in group if not _BAD_TAG_RE.search(p.name)]
+    bad   = [p for p in group if     _BAD_TAG_RE.search(p.name)]
+    if not clean:           # all are bad-tagged — don't auto-delete any
+        return group, []
+    return clean, bad
+
 _KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple]"]] = {
-    "1": ("shortest filename",  lambda p: (len(p.name), p.name)),
-    "2": ("smallest file size", lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
-    "3": ("oldest file",        lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
-    "4": ("newest file",        lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
+    "1": ("shortest filename",                  lambda p: (len(p.name), p.name)),
+    "2": ("smallest file size",                 lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
+    "3": ("oldest file",                        lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
+    "4": ("newest file",                        lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
+    "5": ("preferred region (USA > World > Europe > Japan)", _region_keep_key),
 }
 
 def _prompt_delete_group(title: str,
@@ -2531,19 +2891,44 @@ def _prompt_delete_group(title: str,
         return
     print()
 
-    strat_ch = prompt_choice("  Which file to keep from each group?", {
-        k: f"{C.CYAN}{label}{C.RESET}" for k, (label, _) in _KEEP_STRATEGIES.items()
-    })
-    sort_key, strategy_label = _KEEP_STRATEGIES[strat_ch][1], _KEEP_STRATEGIES[strat_ch][0]
-    print()
+    # ── Bad-tag pre-filter ────────────────────────────────────────────
+    # Split each group into clean copies and obviously inferior ones
+    # (Beta, Demo, Proto, GoodTools bad-dump [b]/[h]/[t]/[o]).
+    # Bad-tagged files are auto-scheduled for deletion when at least one
+    # clean copy exists, so the strategy below only needs to pick among
+    # the clean copies.
+    auto_delete: list[Path] = []
+    filtered_groups: list[list[Path]] = []
+    for group in groups:
+        clean, bad = _split_bad_tags(group)
+        auto_delete.extend(bad)
+        if len(clean) > 1:
+            filtered_groups.append(clean)   # still needs strategy selection
+        # len(clean) == 1: only one clean copy — nothing left to decide
+
+    if auto_delete:
+        cprint(C.DYELLOW,
+               f"  {len(auto_delete)} bad-tagged file(s) (Beta/Demo/Proto/hack) "
+               "will be auto-deleted:")
+        for p in sorted(auto_delete):
+            cprint(C.YELLOW, f"    AUTO-DELETE  {p.name}  ({p.parent})")
+        print()
 
     plan: list[tuple[Path, list[Path]]] = []
-    for group in groups:
-        ordered = sorted(group, key=sort_key)
-        plan.append((ordered[0], ordered[1:]))
+    strategy_label = ""
+    if filtered_groups:
+        strat_ch = prompt_choice("  Which file to keep from each group?", {
+            k: f"{C.CYAN}{lbl}{C.RESET}" for k, (lbl, _) in _KEEP_STRATEGIES.items()
+        })
+        strategy_label, sort_key = _KEEP_STRATEGIES[strat_ch]
+        print()
+        for group in filtered_groups:
+            ordered = sorted(group, key=sort_key)
+            plan.append((ordered[0], ordered[1:]))
 
-    n_to_delete = sum(len(d) for _, d in plan)
-    cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
+    n_to_delete = len(auto_delete) + sum(len(d) for _, d in plan)
+    if strategy_label:
+        cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
     print()
     for keep, to_del in plan:
         cprint(C.GREEN, f"  KEEP    {keep.name}")
@@ -2569,6 +2954,13 @@ def _prompt_delete_group(title: str,
         return
 
     deleted = 0
+    for path in auto_delete:
+        try:
+            path.unlink()
+            cprint(C.RED, f"  DELETED {path}")
+            deleted += 1
+        except OSError as e:
+            cprint(C.YELLOW, f"  FAILED  {path}: {e}")
     for keep, to_del in plan:
         cprint(C.GREEN, f"  KEPT    {keep.name}")
         for path in to_del:
@@ -2734,7 +3126,10 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
 
         elif ext in (".smc", ".sfc"):
             # SMC copier header: present when size % 1024 == 512 and size > 512.
-            size = path.stat().st_size
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
             if size > 512 and size % 1024 == 512:
                 offset = 512
 
@@ -3362,7 +3757,10 @@ def _run_sync(
                 counters.inc("deleted")
             print()
 
-        if not cfg.dry_run:
+        if not cfg.dry_run and cfg.download_mode == "missing":
+            # "all" mode: every downloaded file was already resized by _write_and_convert
+            # and renamed files were resized by _reconcile_art_files.
+            # Only "missing" mode leaves pre-existing covers untouched.
             _resize_pass(covers_base, cfg, counters)
 
     # ----------------------------------------------------------------
@@ -3417,7 +3815,7 @@ def _run_sync(
                 bg_counters.inc("deleted")
             print()
 
-        if not cfg.dry_run:
+        if not cfg.dry_run and cfg.download_mode == "missing":
             _resize_pass(bgs_base, cfg, bg_counters, target_dims="1920x1080",
                          valid_dims=frozenset(VALID_BG_DIMS), label="background JPG",
                          gravity="East" if cfg.bg_style == "boxart" else "center")
@@ -3615,12 +4013,18 @@ def _wizard(
     _wiz_banner(dry_run)
 
     # ── 1. What do you want to do? ────────────────────────────────────
+    _extra = {
+        "6": f"{C.YELLOW}Normalize ROM filenames{C.RESET}",
+        "7": f"{C.YELLOW}Name-based deduplication{C.RESET}",
+        "8": f"{C.YELLOW}Filter non-exclusives across systems{C.RESET}",
+    } if _COMPANION_TOOLS else {}
     task_ch = prompt_choice("  What would you like to do?", {
         "1": f"{C.GREEN}Check duplicate ROMs{C.RESET}",
         "2": f"{C.YELLOW}Check ROM set completeness{C.RESET}",
         "3": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
         "4": f"{C.CYAN}Download covers only{C.RESET}",
         "5": f"{C.CYAN}Download backgrounds only{C.RESET}",
+        **_extra,
         "h": f"{C.GRAY}Help — show usage, cover styles, options{C.RESET}",
     })
     print()
@@ -3682,6 +4086,182 @@ def _wizard(
             script_dir  = script_dir,
             want_list   = want_list,
         )
+        sys.exit(0)
+
+    # ── Task 6: Normalize ROM filenames ───────────────────────────────
+    if task_ch == "6":
+        cprint(C.CYAN, _SECTION)
+        cprint(C.CYAN, "  Normalize ROM filenames")
+        cprint(C.CYAN, _SECTION)
+        print()
+        cprint(C.GRAY, "  Strips region/revision tags, moves trailing articles to the front.")
+        cprint(C.GRAY, "  e.g. 'Legend of Zelda, The (USA) (Rev A).nes'  ->  'The Legend of Zelda.nes'")
+        print()
+        rom_dir = Path(prompt_path("ROM folder"))
+        print()
+        renames = _companion_collect_renames(str(rom_dir))
+        if not renames:
+            cprint(C.GREEN, "  All filenames are already normalized.")
+            sys.exit(0)
+        print(f"  {len(renames)} file(s) would be renamed:\n")
+        for old, new in sorted(renames):
+            cprint(C.GRAY, f"    {os.path.basename(old)}")
+            print(f"    -> {os.path.basename(new)}\n")
+        if dry_run:
+            cprint(C.YELLOW, "  Dry-run mode — pass --rename (or rerun without --dry-run) to apply.")
+            sys.exit(0)
+        apply_ch = prompt_choice("  Apply renames?", {
+            "y": f"{C.GREEN}Yes{C.RESET} — rename the files now",
+            "n": f"{C.GRAY}No{C.RESET}  — cancel",
+        })
+        if apply_ch != "y":
+            print("  Cancelled.")
+            sys.exit(0)
+        skipped, renamed = [], 0
+        for old, new in renames:
+            if os.path.exists(new):
+                cprint(C.YELLOW, f"  SKIP (target exists): {os.path.basename(old)}")
+                skipped.append(old)
+            else:
+                os.rename(old, new)
+                renamed += 1
+        cprint(C.GREEN, f"\n  Renamed {renamed} file(s)." + (f"  {len(skipped)} skipped." if skipped else ""))
+        if skipped:
+            del_ch = prompt_choice(f"  Delete the {len(skipped)} skipped source(s) (already-renamed duplicates)?", {
+                "y": f"{C.DRED}Yes{C.RESET} — delete them",
+                "n": f"{C.GRAY}No{C.RESET}  — keep them",
+            })
+            if del_ch == "y":
+                for path in skipped:
+                    try:
+                        os.remove(path)
+                        print(f"  Deleted: {os.path.basename(path)}")
+                    except OSError as e:
+                        cprint(C.RED, f"  ERROR: {os.path.basename(path)} — {e}")
+        sys.exit(0)
+
+    # ── Task 7: Name-based deduplication ─────────────────────────────
+    if task_ch == "7":
+        cprint(C.CYAN, _SECTION)
+        cprint(C.CYAN, "  Name-based deduplication")
+        cprint(C.CYAN, _SECTION)
+        print()
+        cprint(C.GRAY, "  Groups ROMs by normalized title (strips all tags), then lets you pick")
+        cprint(C.GRAY, "  which copy to keep — by region preference and/or interactively.")
+        print()
+        rom_dir = Path(prompt_path("ROMs root folder (or single-system folder)"))
+        print()
+        pref_raw = input("  Region preference tags, comma-separated (e.g. USA,Fr) or blank: ").strip()
+        preferences = [p.strip() for p in pref_raw.split(",") if p.strip()] if pref_raw else []
+        print()
+        systems = sorted([
+            os.path.join(str(rom_dir), d)
+            for d in os.listdir(str(rom_dir))
+            if os.path.isdir(os.path.join(str(rom_dir), d))
+        ]) or [str(rom_dir)]
+        excludes = list(_companion_DEFAULT_EXCLUDES)
+        ext_preference: dict = {}
+        total = 0
+        for system in systems:
+            dupes = _companion_find_dupes(system)
+            if not dupes:
+                continue
+            sys_name = os.path.basename(system)
+            cprint(C.CYAN, f"\n  {'='*46}")
+            cprint(C.CYAN, f"  System: {sys_name}  ({len(dupes)} duplicate group(s))")
+            if dry_run:
+                cprint(C.GRAY, "  (Dry run — no files will be deleted)")
+            cprint(C.CYAN, f"  {'='*46}")
+            total += _companion_delete_dupes(
+                dupes,
+                dry_run=dry_run,
+                preferences=preferences,
+                excludes=excludes,
+                ext_preference=ext_preference,
+            )
+        if not total and not dry_run:
+            cprint(C.GREEN, "\n  No duplicates found.")
+        elif not dry_run:
+            cprint(C.GREEN, f"\n  Total deleted: {total} file(s).")
+        sys.exit(0)
+
+    # ── Task 8: Filter non-exclusives across systems ──────────────────
+    if task_ch == "8":
+        cprint(C.CYAN, _SECTION)
+        cprint(C.CYAN, "  Filter non-exclusives across systems")
+        cprint(C.CYAN, _SECTION)
+        print()
+        cprint(C.GRAY, "  Finds games in sibling system folders that also exist in a 'main' system.")
+        cprint(C.GRAY, "  Only systems in the same generation family are compared.")
+        print()
+        roms_root = Path(prompt_path("ROMs root folder (contains system subfolders)"))
+        print()
+        all_subs = sorted(d for d in os.listdir(str(roms_root)) if os.path.isdir(os.path.join(str(roms_root), d)))
+        if not all_subs:
+            cprint(C.RED, "  No system subfolders found.")
+            sys.exit(1)
+        print("  Available systems:")
+        for i, name in enumerate(all_subs, 1):
+            print(f"    [{i}] {name}")
+        print()
+        main_raw = input("  Main system (number or folder name): ").strip()
+        if main_raw.isdigit() and 1 <= int(main_raw) <= len(all_subs):
+            main_name = all_subs[int(main_raw) - 1]
+        else:
+            main_name = main_raw
+        main_folder = os.path.join(str(roms_root), main_name)
+        if not os.path.isdir(main_folder):
+            cprint(C.RED, f"  Folder not found: {main_folder}")
+            sys.exit(1)
+        print()
+        family_name, family_members = _companion_detect_family(main_name, _companion_DEFAULT_FAMILIES)
+        if family_name:
+            family_lower = {m.lower() for m in family_members}
+            to_scan = [d for d in all_subs if d != main_name and d.lower() in family_lower]
+            skipped_sys = [d for d in all_subs if d != main_name and d.lower() not in family_lower]
+            cprint(C.CYAN, f"  Main system : {main_name}")
+            cprint(C.CYAN, f"  Family      : {family_name}")
+            if skipped_sys:
+                cprint(C.GRAY, f"  Skipped     : {', '.join(skipped_sys)}  (different generation)")
+        else:
+            to_scan = [d for d in all_subs if d != main_name]
+            cprint(C.CYAN, f"  Main system : {main_name}")
+            cprint(C.GRAY, "  Family      : none detected — comparing all sibling systems")
+        print()
+        main_names = set(_companion_get_files_by_base(main_folder).keys())
+        cprint(C.GREEN, f"  {len(main_names)} unique game(s) in {main_name}")
+        print()
+        to_delete = []
+        for folder_name in to_scan:
+            folder_path = os.path.join(str(roms_root), folder_name)
+            non_excl = [
+                p for name, paths in _companion_get_files_by_base(folder_path).items()
+                if name in main_names for p in paths
+            ]
+            if not non_excl:
+                print(f"  [{folder_name}] — all games are exclusive, nothing to remove.")
+                continue
+            print(f"  [{folder_name}] — {len(non_excl)} non-exclusive(s):")
+            for p in sorted(non_excl):
+                print(f"    {'DELETE' if not dry_run else '      '} {os.path.basename(p)}")
+            to_delete.extend(non_excl)
+        if not to_delete:
+            cprint(C.GREEN, "\n  No non-exclusives found.")
+            sys.exit(0)
+        print()
+        if dry_run:
+            cprint(C.YELLOW, f"  {len(to_delete)} file(s) would be deleted. Dry-run — re-run with --no-dry-run to apply.")
+            sys.exit(0)
+        del_ch = prompt_choice(f"  Delete {len(to_delete)} non-exclusive(s)?", {
+            "y": f"{C.DRED}Yes{C.RESET} — delete them now",
+            "n": f"{C.GRAY}No{C.RESET}  — cancel",
+        })
+        if del_ch == "y":
+            for p in to_delete:
+                os.remove(p)
+            cprint(C.GREEN, f"  Deleted {len(to_delete)} file(s).")
+        else:
+            print("  Cancelled.")
         sys.exit(0)
 
     # ── 2. ROMs path (always) ─────────────────────────────────────────
