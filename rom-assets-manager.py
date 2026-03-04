@@ -1,17 +1,105 @@
 #!/usr/bin/env python3
 """
-rom-assets-manager.py — Download and sync cover art & backgrounds to a ROM library.
+rom-assets-manager.py
+  Manage a ROM library: cover art, backgrounds, deduplication, completeness checks,
+  filename normalisation, and cross-system exclusives filtering.
 
-Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
-Sources: libretro-thumbnails (GitHub) · SteamGridDB · LaunchBox GamesDB
+  Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
+  Run with no arguments to launch the interactive wizard.
+  Run with --help to see all CLI options.
 
-Run with no arguments to launch the interactive wizard.
-Run with --help to see all CLI options.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  WIZARD TASKS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [1] Check duplicate ROMs (hash-based)
+        Four-stage pipeline: group by size → CRC32 → SHA-1 → same-title name
+        matching.  Byte-identical files are confirmed exact duplicates.  Same-
+        title pairs with different content (regional variants, patches) are
+        surfaced separately.
+        Deletion strategies: shortest name · smallest size · oldest · newest ·
+        preferred region (USA > World > Europe > Japan).
+        Bad-tagged files (Beta, Demo, Proto, [b]/[h]/[t]) are auto-removed when
+        a clean copy exists in the same group.
 
-DEPENDENCIES
-    ImageMagick   Required for image conversion and resizing.
-                  Windows: winget install ImageMagick.Q16-HDRI
-                  Linux:   sudo apt install imagemagick
+  [2] Check ROM set completeness
+        Compare a ROM folder against a No-Intro Logiqx XML DAT file.
+        Region modes: USA (1G1R) · Europe (1G1R) · Japan (1G1R) ·
+                      Japan exclusives · Full set (no filter).
+        Outputs a CSV report and an optional plain-text want-list.
+        DAT files: https://dat-o-matic.no-intro.org
+
+  [3] Download covers + backgrounds
+  [4] Download covers only
+  [5] Download backgrounds only
+        Sources (in priority order):
+          libretro-thumbnails (GitHub)  — high-quality boxart with overlay
+          SteamGridDB                   — requires a free API key
+          LaunchBox GamesDB             — no key required
+        Cover styles:
+          with_logo     Box art with system logo overlay (default)
+          without_logo  Clean grid art (SGDB) or screenshot (LaunchBox)
+          game_logo     Title / game logo art
+        Background styles:
+          fanart   SGDB Heroes → LaunchBox Fanart-Background (1920×1080)
+          boxart   Box art letterboxed to 1920×1080
+        Download modes:
+          missing  Download only ROMs that have no cover yet (default, fast)
+          all      Re-download and overwrite every cover
+        Pre-existing covers that are wrong-sized are automatically resized
+        when running in "missing" mode.  In "all" mode every file is resized
+        on the fly as it is downloaded — no separate pass needed.
+
+  [6] Normalize ROM filenames
+        Strips region / revision tags from filenames, moves trailing articles
+        to the front.
+          "Legend of Zelda, The (USA) (Rev A).nes"
+            → "The Legend of Zelda.nes"
+          "Final Fantasy VII (Disc 2) (USA).iso"
+            → "Final Fantasy VII (Disc 2).iso"
+        Dry-run by default; prompts before renaming.
+
+  [7] Name-based deduplication
+        Groups ROMs by normalised title (all tags stripped, articles unified).
+        Useful after normalising filenames or when switching ROM sets.
+        Supports region-preference auto-pick and interactive per-group
+        selection.  Multi-disc sets are automatically skipped.
+
+  [8] Filter non-exclusives across systems
+        Given a "main" system, finds games in sibling system folders that also
+        exist in the main collection.  Only compares systems in the same
+        generation family (8-bit, 16-bit, handhelds, 32-bit, 128-bit).
+        Example: keep only SNES exclusives — removes SNES games that also
+        appear in your Genesis/PCEngine collection.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  DEPENDENCIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ImageMagick   Required for cover/background conversion and resizing.
+                  Windows : winget install ImageMagick.Q16-HDRI
+                  Linux   : sudo apt install imagemagick
+                  macOS   : brew install imagemagick
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  KEY CLI FLAGS  (non-wizard use)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  --roms <dir>              ROMs root folder
+  --covers <dir>            Covers root folder
+  --backgrounds <dir>       Backgrounds root folder
+  --no-dry-run              Apply changes (default is dry run)
+  --check-duplicates        Run hash-based duplicate scan (task 1)
+  --check-completeness      Run completeness check against a DAT (task 2)
+  --dat <file>              No-Intro DAT file (with --check-completeness)
+  --download-mode           missing | all | skip  (default: missing)
+  --cover-style             with_logo | without_logo | game_logo
+  --bg-style                fanart | boxart
+  --region                  any | usa | europe | japan | world
+  --sgdb-key <key>          SteamGridDB API key  (or set SGDB_KEY env var)
+  --github-token <tok>      GitHub token for higher API rate limits
+                            (or set GITHUB_TOKEN env var)
+  --delete-orphans          Remove covers/backgrounds with no matching ROM
+  --report <file>           Report output path  (pass 'none' to disable)
+  --threshold <0.0-1.0>     Fuzzy match threshold  (default 0.4)
+  --parallel-jobs <n>       Download workers  (default 6)
 """
 
 from __future__ import annotations
@@ -3844,7 +3932,7 @@ _SECTION = "  ──────────────────────
 def _wiz_banner(dry_run: bool) -> None:
     print()
     cprint(C.CYAN, "  ╔══════════════════════════════════════╗")
-    cprint(C.CYAN, "  ║         rom-assets-manager  wizard          ║")
+    cprint(C.CYAN, "  ║         rom-assets-manager  wizard   ║")
     cprint(C.CYAN, "  ╚══════════════════════════════════════╝")
     print()
     if dry_run:
@@ -4415,10 +4503,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="rom-assets-manager.py",
         description=(
-            "Download and sync cover art & backgrounds to a ROM library.\n"
-            "Run with no arguments to launch the interactive wizard.\n\n"
-            "Sources: libretro-thumbnails · SteamGridDB · LaunchBox GamesDB\n"
-            "Requires: ImageMagick  (winget install ImageMagick.Q16-HDRI  /  apt install imagemagick)"
+            "ROM library manager: cover art, backgrounds, deduplication,\n"
+            "completeness checks, filename normalisation, exclusives filtering.\n\n"
+            "Run with no arguments to launch the interactive wizard (recommended).\n\n"
+            "Art sources: libretro-thumbnails · SteamGridDB · LaunchBox GamesDB\n"
+            "Requires ImageMagick for image conversion/resizing:\n"
+            "  Windows : winget install ImageMagick.Q16-HDRI\n"
+            "  Linux   : sudo apt install imagemagick\n"
+            "  macOS   : brew install imagemagick"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
