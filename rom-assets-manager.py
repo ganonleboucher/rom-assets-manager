@@ -58,13 +58,7 @@ rom-assets-manager.py
             → "Final Fantasy VII (Disc 2).iso"
         Dry-run by default; prompts before renaming.
 
-  [7] Name-based deduplication
-        Groups ROMs by normalised title (all tags stripped, articles unified).
-        Useful after normalising filenames or when switching ROM sets.
-        Supports region-preference auto-pick and interactive per-group
-        selection.  Multi-disc sets are automatically skipped.
-
-  [8] Filter non-exclusives across systems
+  [7] Filter non-exclusives across systems
         Given a "main" system, finds games in sibling system folders that also
         exist in the main collection.  Only compares systems in the same
         generation family (8-bit, 16-bit, handhelds, 32-bit, 128-bit).
@@ -2242,9 +2236,6 @@ def collect_renames(folder_path: str) -> list[tuple[str, str]]:
 
 # ── dedupe_roms helpers ───────────────────────────────────────────────────────
 
-# Tags that mark obviously inferior copies (GoodTools conventions + common).
-_DEDUP_DEFAULT_EXCLUDES: list[str] = ["Demo", "Beta", "Proto", "b", "o", "h", "t"]
-
 # File extensions that are never ROMs — skipped during name-based grouping.
 _DEDUP_NON_ROM_EXTS: frozenset[str] = frozenset({
     '.sav', '.srm', '.state', '.sta',
@@ -2479,15 +2470,11 @@ def delete_name_duplicates(
 
     return total
 
-# ── companion aliases (used by wizard tasks 6 / 7 / 8) ───────────────────────
-_companion_normalize_filename = normalize_filename
+# ── companion aliases (used by wizard tasks 6 / 7) ────────────────────────────
 _companion_collect_renames    = collect_renames
 _companion_get_files_by_base  = get_files_by_basename
-_companion_find_dupes         = find_name_duplicates
-_companion_delete_dupes       = delete_name_duplicates
 _companion_detect_family      = detect_family
 _companion_DEFAULT_FAMILIES   = _DEDUP_DEFAULT_FAMILIES
-_companion_DEFAULT_EXCLUDES   = _DEDUP_DEFAULT_EXCLUDES
 
 # =============================================================================
 # Multi-track disc dumps (.bin/.cue) contain CDDA audio tracks alongside the
@@ -2859,7 +2846,7 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                     sz = p.stat().st_size
                 except OSError:
                     sz = 0
-                cprint(C.YELLOW, f"    - {p.name}  ({sz:,} bytes)")
+                cprint(C.YELLOW, f"    - {p}  ({sz:,} bytes)")
         print()
 
     dup_paths    = {fp for g in confirmed for fp, _, _, _ in g}
@@ -2943,12 +2930,13 @@ def _split_bad_tags(group: list[Path]) -> tuple[list[Path], list[Path]]:
         return group, []
     return clean, bad
 
-_KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple]"]] = {
-    "1": ("shortest filename",                  lambda p: (len(p.name), p.name)),
-    "2": ("smallest file size",                 lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
-    "3": ("oldest file",                        lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
-    "4": ("newest file",                        lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
+_KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple] | None"]] = {
+    "1": ("shortest filename",                        lambda p: (len(p.name), p.name)),
+    "2": ("smallest file size",                       lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
+    "3": ("oldest file",                              lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
+    "4": ("newest file",                              lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
     "5": ("preferred region (USA > World > Europe > Japan)", _region_keep_key),
+    "6": ("choose per group (interactive)",           None),
 }
 
 def _prompt_delete_group(title: str,
@@ -3002,6 +2990,44 @@ def _prompt_delete_group(title: str,
             cprint(C.YELLOW, f"    AUTO-DELETE  {p.name}  ({p.parent})")
         print()
 
+    # ── Extension-conflict resolution ─────────────────────────────────
+    # Groups where the same game title exists in multiple formats
+    # (e.g. .smc headered vs .sfc clean) get a one-time format question
+    # per unique extension pair.  Files of the rejected format are added to
+    # auto_delete; the survivors go on to the strategy picker.
+    if filtered_groups:
+        ext_pref: dict[frozenset[str], str | None] = {}
+        resolved: list[list[Path]] = []
+        for group in filtered_groups:
+            exts = {p.suffix.lower() for p in group}
+            if len(exts) > 1:
+                ext_key = frozenset(exts)
+                if ext_key not in ext_pref:
+                    cprint(C.DYELLOW,
+                           f"  Extension conflict ({', '.join(sorted(exts))}) "
+                           f"— first seen in group '{_norm_for_dedup(group[0].stem)}':")
+                    for p in sorted(group):
+                        try:
+                            sz = p.stat().st_size
+                        except OSError:
+                            sz = 0
+                        cprint(C.GRAY, f"    {p.name}  ({sz:,} bytes)")
+                    ext_pref[ext_key] = _dedup_ask_ext(sorted(exts))
+                    print()
+                keep_ext = ext_pref[ext_key]
+                if keep_ext is None:
+                    resolved.append(group)   # skipped — leave intact
+                    continue
+                rejected  = [p for p in group if p.suffix.lower() != keep_ext]
+                remaining = [p for p in group if p.suffix.lower() == keep_ext]
+                auto_delete.extend(rejected)
+                if len(remaining) > 1:
+                    resolved.append(remaining)
+                # len == 1: single copy left, nothing more to decide
+            else:
+                resolved.append(group)
+        filtered_groups = resolved
+
     plan: list[tuple[Path, list[Path]]] = []
     strategy_label = ""
     if filtered_groups:
@@ -3010,16 +3036,42 @@ def _prompt_delete_group(title: str,
         })
         strategy_label, sort_key = _KEEP_STRATEGIES[strat_ch]
         print()
-        for group in filtered_groups:
-            ordered = sorted(group, key=sort_key)
-            plan.append((ordered[0], ordered[1:]))
+
+        if sort_key is None:
+            # ── Interactive: decide per group ─────────────────────────
+            for group in filtered_groups:
+                cprint(C.CYAN, f"\n  [{_norm_for_dedup(group[0].stem)}]")
+                for i, p in enumerate(group, 1):
+                    try:
+                        sz = p.stat().st_size
+                    except OSError:
+                        sz = 0
+                    print(f"    [{i}] {p.name}  ({sz:,} bytes)  ({p.parent})")
+                while True:
+                    try:
+                        raw = input(f"  Keep which? (1-{len(group)}, s=skip): ").strip().lower()
+                    except KeyboardInterrupt:
+                        print()
+                        raise
+                    if raw == 's':
+                        break
+                    if raw.isdigit() and 1 <= int(raw) <= len(group):
+                        keep = group[int(raw) - 1]
+                        plan.append((keep, [p for p in group if p is not keep]))
+                        break
+                    print("  Invalid choice.")
+            print()
+        else:
+            for group in filtered_groups:
+                ordered = sorted(group, key=sort_key)
+                plan.append((ordered[0], ordered[1:]))
 
     n_to_delete = len(auto_delete) + sum(len(d) for _, d in plan)
     if strategy_label:
         cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
     print()
     for keep, to_del in plan:
-        cprint(C.GREEN, f"  KEEP    {keep.name}")
+        cprint(C.GREEN, f"  KEEP    {keep.name}  ({keep.parent})")
         for p in to_del:
             cprint(C.RED, f"  DELETE  {p.name}  ({p.parent})")
     print()
@@ -4103,8 +4155,7 @@ def _wizard(
     # ── 1. What do you want to do? ────────────────────────────────────
     _extra = {
         "6": f"{C.YELLOW}Normalize ROM filenames{C.RESET}",
-        "7": f"{C.YELLOW}Name-based deduplication{C.RESET}",
-        "8": f"{C.YELLOW}Filter non-exclusives across systems{C.RESET}",
+        "7": f"{C.YELLOW}Filter non-exclusives across systems{C.RESET}",
     } if _COMPANION_TOOLS else {}
     task_ch = prompt_choice("  What would you like to do?", {
         "1": f"{C.GREEN}Check duplicate ROMs{C.RESET}",
@@ -4228,53 +4279,8 @@ def _wizard(
                         cprint(C.RED, f"  ERROR: {os.path.basename(path)} — {e}")
         sys.exit(0)
 
-    # ── Task 7: Name-based deduplication ─────────────────────────────
+    # ── Task 7: Filter non-exclusives across systems ──────────────────
     if task_ch == "7":
-        cprint(C.CYAN, _SECTION)
-        cprint(C.CYAN, "  Name-based deduplication")
-        cprint(C.CYAN, _SECTION)
-        print()
-        cprint(C.GRAY, "  Groups ROMs by normalized title (strips all tags), then lets you pick")
-        cprint(C.GRAY, "  which copy to keep — by region preference and/or interactively.")
-        print()
-        rom_dir = Path(prompt_path("ROMs root folder (or single-system folder)"))
-        print()
-        pref_raw = input("  Region preference tags, comma-separated (e.g. USA,Fr) or blank: ").strip()
-        preferences = [p.strip() for p in pref_raw.split(",") if p.strip()] if pref_raw else []
-        print()
-        systems = sorted([
-            os.path.join(str(rom_dir), d)
-            for d in os.listdir(str(rom_dir))
-            if os.path.isdir(os.path.join(str(rom_dir), d))
-        ]) or [str(rom_dir)]
-        excludes = list(_companion_DEFAULT_EXCLUDES)
-        ext_preference: dict = {}
-        total = 0
-        for system in systems:
-            dupes = _companion_find_dupes(system)
-            if not dupes:
-                continue
-            sys_name = os.path.basename(system)
-            cprint(C.CYAN, f"\n  {'='*46}")
-            cprint(C.CYAN, f"  System: {sys_name}  ({len(dupes)} duplicate group(s))")
-            if dry_run:
-                cprint(C.GRAY, "  (Dry run — no files will be deleted)")
-            cprint(C.CYAN, f"  {'='*46}")
-            total += _companion_delete_dupes(
-                dupes,
-                dry_run=dry_run,
-                preferences=preferences,
-                excludes=excludes,
-                ext_preference=ext_preference,
-            )
-        if not total and not dry_run:
-            cprint(C.GREEN, "\n  No duplicates found.")
-        elif not dry_run:
-            cprint(C.GREEN, f"\n  Total deleted: {total} file(s).")
-        sys.exit(0)
-
-    # ── Task 8: Filter non-exclusives across systems ──────────────────
-    if task_ch == "8":
         cprint(C.CYAN, _SECTION)
         cprint(C.CYAN, "  Filter non-exclusives across systems")
         cprint(C.CYAN, _SECTION)
