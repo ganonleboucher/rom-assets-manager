@@ -4154,16 +4154,16 @@ def _wizard(
 
     # ── 1. What do you want to do? ────────────────────────────────────
     _extra = {
-        "6": f"{C.YELLOW}Normalize ROM filenames{C.RESET}",
-        "7": f"{C.YELLOW}Filter non-exclusives across systems{C.RESET}",
+        "2": f"{C.YELLOW}Normalize ROM filenames{C.RESET}",
+        "3": f"{C.YELLOW}Filter non-exclusives across systems{C.RESET}",
     } if _COMPANION_TOOLS else {}
     task_ch = prompt_choice("  What would you like to do?", {
         "1": f"{C.GREEN}Check duplicate ROMs{C.RESET}",
-        "2": f"{C.YELLOW}Check ROM set completeness{C.RESET}",
-        "3": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
-        "4": f"{C.CYAN}Download covers only{C.RESET}",
-        "5": f"{C.CYAN}Download backgrounds only{C.RESET}",
         **_extra,
+        "4": f"{C.YELLOW}Check ROM set completeness{C.RESET}",
+        "5": f"{C.CYAN}Download covers + backgrounds{C.RESET}",
+        "6": f"{C.CYAN}Download covers only{C.RESET}",
+        "7": f"{C.CYAN}Download backgrounds only{C.RESET}",
         "h": f"{C.GRAY}Help — show usage, cover styles, options{C.RESET}",
     })
     print()
@@ -4174,10 +4174,10 @@ def _wizard(
         print(__doc__)
         sys.exit(0)
 
-    need_covers     = task_ch in ("3", "4")
-    need_bgs        = task_ch in ("3", "5")
+    need_covers     = task_ch in ("5", "6")
+    need_bgs        = task_ch in ("5", "7")
     is_dup          = task_ch == "1"
-    is_completeness = task_ch == "2"
+    is_completeness = task_ch == "4"
 
     # ── Completeness check (early exit — single folder + DAT, no system detection) ──
     if is_completeness:
@@ -4227,8 +4227,8 @@ def _wizard(
         )
         sys.exit(0)
 
-    # ── Task 6: Normalize ROM filenames ───────────────────────────────
-    if task_ch == "6":
+    # ── Task 2: Normalize ROM filenames ───────────────────────────────
+    if task_ch == "2":
         cprint(C.CYAN, _SECTION)
         cprint(C.CYAN, "  Normalize ROM filenames")
         cprint(C.CYAN, _SECTION)
@@ -4279,8 +4279,8 @@ def _wizard(
                         cprint(C.RED, f"  ERROR: {os.path.basename(path)} — {e}")
         sys.exit(0)
 
-    # ── Task 7: Filter non-exclusives across systems ──────────────────
-    if task_ch == "7":
+    # ── Task 3: Filter non-exclusives across systems ──────────────────
+    if task_ch == "3":
         cprint(C.CYAN, _SECTION)
         cprint(C.CYAN, "  Filter non-exclusives across systems")
         cprint(C.CYAN, _SECTION)
