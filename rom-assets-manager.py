@@ -5,34 +5,44 @@ rom-assets-manager.py
   filename normalisation, and cross-system exclusives filtering.
 
   Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
-  Run with no arguments to launch the interactive wizard.
-  Run with --help to see all CLI options.
+  Run with no arguments for the interactive wizard, or --help for CLI options.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━���━━━━━━━━━━━━━━━━━━
   WIZARD TASKS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   [1] Check duplicate ROMs (hash-based)
         Four-stage pipeline: group by size → CRC32 → SHA-1 → same-title name
-        matching.  Byte-identical files are confirmed exact duplicates.  Same-
-        title pairs with different content (regional variants, patches) are
-        surfaced separately.
+        matching. Byte-identical files are confirmed exact duplicates.
+        Same-title pairs with different content (regional variants, patches)
+        are surfaced separately.
         Deletion strategies: shortest name · smallest size · oldest · newest ·
         preferred region (USA > World > Europe > Japan).
         Bad-tagged files (Beta, Demo, Proto, [b]/[h]/[t]) are auto-removed when
         a clean copy exists in the same group.
 
-  [2] Check ROM set completeness
+  [2] Normalize ROM filenames
+        Strips region / revision tags, moves trailing articles to the front.
+          "Legend of Zelda, The (USA) (Rev A).nes"  →  "The Legend of Zelda.nes"
+          "Final Fantasy VII (Disc 2) (USA).iso"    →  "Final Fantasy VII (Disc 2).iso"
+        Dry-run by default; prompts before renaming.
+
+  [3] Filter non-exclusives across systems
+        Given a "main" system, removes games from sibling system folders that
+        also exist in the main collection. Only compares systems in the same
+        generation family (8-bit, 16-bit, handhelds, 32-bit, 128-bit).
+
+  [4] Check ROM set completeness
         Compare a ROM folder against a No-Intro Logiqx XML DAT file.
         Region modes: USA (1G1R) · Europe (1G1R) · Japan (1G1R) ·
                       Japan exclusives · Full set (no filter).
         Outputs a CSV report and an optional plain-text want-list.
         DAT files: https://dat-o-matic.no-intro.org
 
-  [3] Download covers + backgrounds
-  [4] Download covers only
-  [5] Download backgrounds only
+  [5] Download covers + backgrounds
+  [6] Download covers only
+  [7] Download backgrounds only
         Sources (in priority order):
-          libretro-thumbnails (GitHub)  — high-quality boxart with overlay
+          libretro-thumbnails (GitHub)  — high-quality boxart with system logo
           SteamGridDB                   — requires a free API key
           LaunchBox GamesDB             — no key required
         Cover styles:
@@ -43,27 +53,9 @@ rom-assets-manager.py
           fanart   SGDB Heroes → LaunchBox Fanart-Background (1920×1080)
           boxart   Box art letterboxed to 1920×1080
         Download modes:
-          missing  Download only ROMs that have no cover yet (default, fast)
+          missing  Download only ROMs without a cover yet (default)
           all      Re-download and overwrite every cover
-        Pre-existing covers that are wrong-sized are automatically resized
-        when running in "missing" mode.  In "all" mode every file is resized
-        on the fly as it is downloaded — no separate pass needed.
-
-  [6] Normalize ROM filenames
-        Strips region / revision tags from filenames, moves trailing articles
-        to the front.
-          "Legend of Zelda, The (USA) (Rev A).nes"
-            → "The Legend of Zelda.nes"
-          "Final Fantasy VII (Disc 2) (USA).iso"
-            → "Final Fantasy VII (Disc 2).iso"
-        Dry-run by default; prompts before renaming.
-
-  [7] Filter non-exclusives across systems
-        Given a "main" system, finds games in sibling system folders that also
-        exist in the main collection.  Only compares systems in the same
-        generation family (8-bit, 16-bit, handhelds, 32-bit, 128-bit).
-        Example: keep only SNES exclusives — removes SNES games that also
-        appear in your Genesis/PCEngine collection.
+        Pre-existing wrong-sized covers are resized in "missing" mode.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   DEPENDENCIES
@@ -75,20 +67,20 @@ rom-assets-manager.py
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   KEY CLI FLAGS  (non-wizard use)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━��━━━━━━━━━━━━━━━━━━━━━━━━━━━���━━━━━━━━━━━━━━━━━━━━━━━━
   --roms <dir>              ROMs root folder
   --covers <dir>            Covers root folder
   --backgrounds <dir>       Backgrounds root folder
   --no-dry-run              Apply changes (default is dry run)
   --check-duplicates        Run hash-based duplicate scan (task 1)
-  --check-completeness      Run completeness check against a DAT (task 2)
+  --check-completeness      Run completeness check against a DAT (task 4)
   --dat <file>              No-Intro DAT file (with --check-completeness)
   --download-mode           missing | all | skip  (default: missing)
   --cover-style             with_logo | without_logo | game_logo
   --bg-style                fanart | boxart
   --region                  any | usa | europe | japan | world
   --sgdb-key <key>          SteamGridDB API key  (or set SGDB_KEY env var)
-  --github-token <tok>      GitHub token for higher API rate limits
+  --github-token <tok>      GitHub token for higher rate limits
                             (or set GITHUB_TOKEN env var)
   --delete-orphans          Remove covers/backgrounds with no matching ROM
   --report <file>           Report output path  (pass 'none' to disable)
@@ -136,14 +128,7 @@ _COMPANION_TOOLS = True
 def _ansi(code): return f"\033[{code}m"
 
 def _try_enable_windows_ansi() -> bool:
-    """Enable ANSI virtual terminal processing on Windows via SetConsoleMode.
-    PowerShell 7 (pwsh.exe) and cmd.exe on Windows 10+ support ANSI escape
-    codes, but the console mode flag must be set explicitly for them to render.
-    Calling SetConsoleMode with ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x0004)
-    activates it for the current process.  Returns True on success.
-    On non-Windows, importing ctypes.windll raises AttributeError — caught and
-    returns False so callers need no platform guard.
-    """
+    """Enable ANSI VT processing on Windows (SetConsoleMode). Returns True on success."""
     try:
         import ctypes, ctypes.wintypes
         STD_OUTPUT_HANDLE    = -11
@@ -166,22 +151,20 @@ def _detect_color_support() -> bool:
     if not sys.stdout.isatty():
         return False
     if os.name != "nt":
-        return True                                    # Linux / macOS: always supported
-    # Windows: try to activate VT processing via the Win32 console API.
-    # This covers PowerShell 7, cmd.exe, and Windows Terminal in one call.
+        return True
     if _try_enable_windows_ansi():
         return True
-    # Fallback env-var checks for third-party wrappers that handle ANSI themselves.
+    # Fallback for third-party wrappers that handle ANSI themselves.
     return (
         "WT_SESSION" in os.environ                     # Windows Terminal
-        or "ANSICON" in os.environ                     # ANSICON wrapper
-        or os.environ.get("TERM_PROGRAM") == "vscode"  # VS Code terminal
+        or "ANSICON" in os.environ
+        or os.environ.get("TERM_PROGRAM") == "vscode"
     )
 
 USE_COLOR = _detect_color_support()
 
 class C:
-    # Prefix "D" = bright/distinct variant of the base colour
+    # "D" prefix = bright variant
     RESET   = _ansi(0)   if USE_COLOR else ""
     CYAN    = _ansi(36)  if USE_COLOR else ""
     GREEN   = _ansi(32)  if USE_COLOR else ""
@@ -203,13 +186,7 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 class ReportTee:
-    """Context manager: duplicates sys.stdout to a plain-text report file.
-    Terminal output keeps ANSI colour codes; the file receives ANSI-stripped text.
-    Usage::
-        with ReportTee(path) as tee:
-            _print_summary(...)
-        print(f"  Report saved to: {tee.path}")
-    """
+    """Context manager: tees sys.stdout to a plain-text file (ANSI stripped)."""
     _orig: TextIO
     _fh:   IO[str]
 
@@ -303,29 +280,18 @@ SYSTEM_MAP = {
 }
 
 # ---------------------------------------------------------------------------
-# Folder-name resolver — three-tier lookup used by the sync loop to map an
-# arbitrary ROM folder name to a libretro-thumbnails repo name.
-#
-# Tier 1 — exact:   folder.lower() is a key in SYSTEM_MAP (e.g. "snes", "n64")
-# Tier 2 — alias:   _norm_folder(folder) matches FOLDER_ALIASES, which maps the
-#                   ~100 most common naming variants (long-form names, spaces,
-#                   EmulationStation / Batocera / Recalbox conventions…) to a
-#                   SYSTEM_MAP key. The normaliser collapses separators so
-#                   "Nintendo_64", "Nintendo-64", "Nintendo 64" all hit the same entry.
-# Tier 3 — content: inspect the files inside the folder:
-#   3a. Extension profiling: unambiguous extensions (e.g. .z64, .gba) are counted;
-#       the system with ≥60% of votes wins. Ambiguous extensions (.bin, .iso, .chd,
-#       .cue, .img, .ecm, .rom) are skipped at this step.
-#   3b. Header sniffing: if profiling fails (e.g. all files are .bin), read the first
-#       ~300 bytes of up to 5 files and match known ROM magic signatures. Only used
-#       as a last resort; capped to bound I/O cost on large collections.
-#
-# A gray info line is printed for alias and content matches.
-# Unresolved folders fall through to SGDB/LaunchBox only (no crash, no silent skip).
+# Folder-name resolver — three-tier lookup: folder name → libretro-thumbnails repo.
+# Tier 1 — exact:   folder.lower() is a SYSTEM_MAP key (e.g. "snes", "n64").
+# Tier 2 — alias:   normalized name matches FOLDER_ALIASES (handles long-form
+#                   names, spaces/underscores/hyphens, ES/Batocera/Recalbox variants).
+# Tier 3 — content: inspect files in the folder:
+#   3a. Extension profiling: unambiguous extensions counted; ≥60% share wins.
+#   3b. Header sniffing: read magic bytes from up to 5 ambiguous (.bin/.iso/…)
+#       files; unanimous agreement required.
+# Unresolved folders fall through to SGDB/LaunchBox only.
 # ---------------------------------------------------------------------------
 
-# Normalised variant → SYSTEM_MAP key.
-# Keys are already normalised: lowercase, non-alphanumeric collapsed to space.
+# Normalized variant → SYSTEM_MAP key (lowercase, non-alphanumeric collapsed to space).
 FOLDER_ALIASES: dict[str, str] = {
     # NES / Famicom
     "nintendo entertainment system": "nes",
@@ -428,16 +394,13 @@ FOLDER_ALIASES: dict[str, str] = {
     "scumm vm": "scummvm",
 }
 
-# Compiled once at import time: non-alphanumeric runs → single space
 _FOLDER_NORM_RE = re.compile(r"[^a-z0-9]+")
 
 def _norm_folder(name: str) -> str:
     """Lowercase and collapse non-alphanumeric runs to a single space."""
     return _FOLDER_NORM_RE.sub(" ", name.lower()).strip()
 
-# Extension → SYSTEM_MAP key for unambiguous extensions (one system only).
-# Ambiguous extensions (.bin .iso .chd .cue .img .ecm .rom) are excluded here;
-# they are handled by header sniffing in Tier 3b.
+# Unambiguous extension → SYSTEM_MAP key. Ambiguous ones (.bin .iso etc.) handled by Tier 3b.
 _EXT_TO_SYSTEM_KEY: dict[str, str] = {
     ".nes": "nes",      ".fds": "fds",
     ".sfc": "snes",     ".smc": "snes",
@@ -460,14 +423,12 @@ _EXT_TO_SYSTEM_KEY: dict[str, str] = {
     ".col": "coleco",   ".vec": "vectrex",
 }
 
-# Ambiguous extensions whose system cannot be determined from the name alone.
 _AMBIGUOUS_EXTS: frozenset[str] = frozenset({
     ".iso", ".bin", ".cue", ".img", ".chd", ".ecm", ".rom",
 })
 
-# ROM magic signatures for header sniffing.
-# Each entry: (byte_offset, magic_bytes, system_key).
-# Order matters for overlapping prefixes (e.g. "SEGADISCSYSTEM" must come before "SEGA").
+# ROM magic signatures: (byte_offset, magic_bytes, system_key).
+# Order matters: longer/more-specific prefixes must precede shorter ones.
 _ROM_MAGIC: tuple[tuple[int, bytes, str], ...] = (
     (0,   b"NES\x1a",             "nes"),       # iNES header
     (0,   b"\x80\x37\x12\x40", "n64"),       # N64 .z64 big-endian
@@ -495,10 +456,8 @@ def _sniff_rom_header(path: Path) -> str | None:
 
 def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
     """Inspect files in rom_dir to infer the system. Returns (system_key, tier).
-    Tier 3a — extension profiling: count unambiguous extensions; the system with
-              ≥60% of all counted votes wins.
-    Tier 3b — header sniffing: read magic bytes from up to 5 ambiguous files;
-              only returns a result when all sniffed files unanimously agree.
+    Tier 3a: extension profiling — ≥60% share wins.
+    Tier 3b: header sniffing — unanimous agreement across up to 5 files.
     """
 
     ext_votes: Counter = Counter()
@@ -525,14 +484,14 @@ def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
     # Tier 3b: header sniffing (only when no unambiguous extensions found)
     if not ext_votes and ambiguous_files:
         header_votes: Counter = Counter()
-        for p in ambiguous_files[:5]:       # cap at 5 files to bound I/O cost
+        for p in ambiguous_files[:5]:
             key = _sniff_rom_header(p)
             if key:
                 header_votes[key] += 1
         if header_votes:
             top_key, top_count = header_votes.most_common(1)[0]
             total = sum(header_votes.values())
-            if top_count == total:          # unanimous agreement only
+            if top_count == total:  # unanimous agreement only
                 return top_key, "content-header"
 
     return "", ""
@@ -552,22 +511,18 @@ def resolve_system_folder(folder: str, rom_dir: Path | None = None) -> tuple[str
     """Map a ROM folder name to (repo_name, tier).
     repo_name: libretro-thumbnails repo slug, or "" if unresolved.
     tier:      "exact" | "alias" | "content-ext" | "content-header" | ""
-    rom_dir: path to the actual ROM folder for Tier 3 content inspection.
-             If None or non-existent, Tier 3 is skipped.
     """
-    # Tier 1: exact SYSTEM_MAP key (e.g. "snes", "n64", "dc")
+    # Tier 1: exact SYSTEM_MAP key
     key = folder.lower()
     if key in SYSTEM_MAP:
         return SYSTEM_MAP[key], "exact"
 
-    # Tier 2: normalise separators then check alias table.
-    # _norm_folder collapses spaces, underscores, hyphens to a single space so
-    # "Nintendo_64", "Nintendo-64", "Nintendo 64" all resolve identically.
+    # Tier 2: normalize separators and check alias table
     alias_key = FOLDER_ALIASES.get(_norm_folder(folder))
     if alias_key:
         return SYSTEM_MAP[alias_key], "alias"
 
-    # Tier 3: content-based identification (only if rom_dir provided and exists)
+    # Tier 3: content-based identification
     if rom_dir and rom_dir.is_dir():
         content_key, content_tier = _profile_folder_contents(rom_dir)
         if content_key and content_key in SYSTEM_MAP:
@@ -578,21 +533,19 @@ def resolve_system_folder(folder: str, rom_dir: Path | None = None) -> tuple[str
 BASE_RAW_URL = "https://raw.githubusercontent.com/libretro-thumbnails"
 BASE_API_URL = "https://api.github.com/repos/libretro-thumbnails"
 
-# SteamGridDB (clean fan-art covers, no console logos)
 SGDB_API_BASE = "https://www.steamgriddb.com/api/v2"
 
-# LaunchBox GamesDB — public Metadata.zip (no scraping, no API key required)
+# LaunchBox GamesDB — public Metadata.zip, updated daily, no API key required
 LBDB_METADATA_URL = "https://gamesdb.launchbox-app.com/Metadata.zip"
 LBDB_IMG_BASE      = "https://images.launchbox-app.com/"
 
-# Valid background dimensions (anything else gets letterboxed to 1920x1080)
+# Valid background dimensions; anything else is letterboxed to 1920x1080
 VALID_BG_DIMS = {"1920x1080", "1280x720"}
 
 # =============================================================================
 # REGION PREFERENCE
 # =============================================================================
-# Maps the canonical region key the user picks -> tag substrings that identify
-# that region inside a libretro-thumbnails filename like "Game (USA, Europe)".
+# Canonical region key → substrings found in libretro-thumbnails filenames.
 REGION_KEYWORDS: dict[str, set[str]] = {
     "usa":    {"usa", "north america"},
     "europe": {"europe", "germany", "france", "spain", "italy",
@@ -626,11 +579,9 @@ _REGION_TAG_RE = re.compile(r'\(([^)]+)\)')
 
 def region_of(name: str) -> str | None:
     """Return the canonical region key for a repo filename, or None.
-    Splits multi-value tags by comma so the first listed region wins:
-    e.g. "Game (Japan, USA)" -> "japan", "Game (World)" -> "world".
+    First listed region in multi-value tags wins: "(Japan, USA)" → "japan".
     """
     for m in _REGION_TAG_RE.finditer(name):
-        # Split "Japan, USA" -> ["Japan", "USA"] so first listed wins
         for part in m.group(1).split(','):
             part = part.strip().lower()
             for key, keywords in REGION_KEYWORDS.items():
@@ -640,18 +591,10 @@ def region_of(name: str) -> str | None:
 
 def sort_by_region(candidates: list[tuple[str, float]],
                    preferred: str) -> list[tuple[str, float]]:
-    """Stable re-sort of ranked_matches output to prefer a region.
-    Adds a small bonus to the sort key so that a preferred-region cover
-    beats same-score variants without overriding a genuinely better-scoring
-    different title.  Bonuses:
-      preferred region  +0.10
-      "world" (neutral) +0.05   (good fallback if preferred not found)
-      anything else      0.00
-    The bonus (0.10) exceeds the smallest tier gap (0.02: 0.90→0.88), so
-    a preferred-region candidate at 0.88 will beat a non-preferred one at
-    0.90 — intentional, since region is a meaningful signal. To reduce
-    false promotions on ambiguous matches, consider --threshold 0.5 when
-    using --region.
+    """Re-sort ranked_matches output to prefer a region.
+    Score bonuses: preferred +0.10, world +0.05, other 0.
+    The 0.10 bonus exceeds the smallest tier gap (0.02), so a preferred-region
+    candidate at 0.88 beats a non-preferred one at 0.90 — intentional.
     """
     if not preferred or preferred == "any":
         return candidates
@@ -669,23 +612,19 @@ def sort_by_region(candidates: list[tuple[str, float]],
 # =============================================================================
 # FUZZY MATCHING
 # =============================================================================
-_TAG_RE         = re.compile(r"\s*[\(\[].*?[\)\]]")
-_SEQNUM_RE      = re.compile(r"_\d+$")   # strips trailing _1, _2 ... so "Game_1" matches the cover for "Game"
-_WORD_RE        = re.compile(r"\W+")       # word tokenizer for Jaccard scoring
-_WS_RE          = re.compile(r"\s+")       # whitespace collapser for strip_tags
-_SUBTITLE_SEP_RE = re.compile(r"\s+-\s+") # subtitle separator: "Title - Subtitle" → "Title Subtitle"
-_NONALNUM_RE    = re.compile(r"[^a-z0-9]") # compact key: strip all non-alphanumeric for grouping
+_TAG_RE          = re.compile(r"\s*[\(\[].*?[\)\]]")
+_SEQNUM_RE       = re.compile(r"_\d+$")        # strip trailing _1, _2 …
+_WORD_RE         = re.compile(r"\W+")           # word tokenizer for Jaccard
+_WS_RE           = re.compile(r"\s+")
+_SUBTITLE_SEP_RE = re.compile(r"\s+-\s+")      # "Title - Subtitle" → "Title Subtitle"
+_NONALNUM_RE     = re.compile(r"[^a-z0-9]")    # compact key for dedup grouping
 
 def strip_tags(name: str) -> str:
     """Remove parenthesized/bracketed tags (region, revision, etc.) and collapse whitespace."""
     return _WS_RE.sub(" ", _TAG_RE.sub("", name)).strip()
 
 def normalize(name: str) -> str:
-    """Strip region/language tags and trailing sequence numbers (_1, _2…) for cover matching.
-    This is a name normalisation step for fuzzy cover lookup only — it does NOT
-    imply the file is a duplicate.  Duplicate detection is content-based (CRC32 + SHA-1)
-    and lives entirely in check_duplicates(), which never calls this function.
-    """
+    """Strip region/revision tags and trailing sequence numbers (_1, _2…) for cover matching."""
     return _SEQNUM_RE.sub("", strip_tags(name)).strip()
 
 _ARTICLE_TRAIL_RE = re.compile(r',\s*(?:the|a|an)$', re.IGNORECASE)
@@ -693,19 +632,18 @@ _ARTICLE_LEAD_RE  = re.compile(r'^(?:the|a|an)\s+',  re.IGNORECASE)
 
 def _norm_for_dedup(stem: str) -> str:
     """Normalize a ROM stem for same-title grouping in duplicate detection.
-    Unlike normalize() (cover-art lookup), this also strips leading/trailing
-    articles so that 'The Legend of Zelda' and 'Legend of Zelda, The' map to
-    the same key and get grouped as potential same-title duplicates.
+    Like normalize() but also strips leading/trailing articles so
+    'The Legend of Zelda' and 'Legend of Zelda, The' map to the same key.
     """
-    s = strip_tags(stem)               # strip (USA), (Rev A), [!], etc.
-    s = _SEQNUM_RE.sub("", s)         # strip trailing _1, _2 copy numbers
-    s = _SUBTITLE_SEP_RE.sub(" ", s)  # "Hot Wheels - Turbo Racing" → "Hot Wheels Turbo Racing"
-    s = _ARTICLE_TRAIL_RE.sub("", s)  # "Legend of Zelda, The" -> "Legend of Zelda"
-    s = _ARTICLE_LEAD_RE.sub("", s)   # "The Legend of Zelda"  -> "Legend of Zelda"
+    s = strip_tags(stem)
+    s = _SEQNUM_RE.sub("", s)
+    s = _SUBTITLE_SEP_RE.sub(" ", s)
+    s = _ARTICLE_TRAIL_RE.sub("", s)
+    s = _ARTICLE_LEAD_RE.sub("", s)
     return s.strip().lower()
 
 def _similarity_prenorm(a_low: str, a_norm: str, b_low: str, b_norm: str) -> float:
-    """Core similarity logic operating on pre-lowercased, pre-normalized strings."""
+    """Similarity score on pre-lowercased, pre-normalized strings."""
     if a_low == b_low:                              return 1.00  # exact match
     if a_norm and a_norm == b_norm:                 return 0.95  # equal after tag/seq strip
     if b_low  and a_low.startswith(b_low):          return 0.90  # raw prefix
@@ -722,24 +660,22 @@ def _similarity_prenorm(a_low: str, a_norm: str, b_low: str, b_norm: str) -> flo
     words_b = {w for w in _WORD_RE.split(b_norm) if len(w) > 1}
     if not words_a or not words_b:                  return 0.0
     common = len(words_a & words_b)
-    if common < 2:                                  return 0.0   # require ≥2 shared words
+    if common < 2:                                  return 0.0  # require ≥2 shared words
     union = len(words_a | words_b)
-    return round(common / union, 4) if union else 0.0            # Jaccard index
+    return round(common / union, 4) if union else 0.0           # Jaccard index
 
 def similarity(a: str, b: str) -> float:
-    """Public similarity score between two ROM/cover names (0.0–1.0).
-    Useful for callers and testing; internally _similarity_prenorm is used.
-    """
+    """Similarity score between two ROM/cover names (0.0–1.0)."""
     return _similarity_prenorm(
         a.lower().strip(), normalize(a).lower(),
         b.lower().strip(), normalize(b).lower()
     )
 
 PNG_SIGNATURE  = b'\x89PNG\r\n\x1a\n'
-WEBP_SIGNATURE = b'WEBP'  # bytes 8-11 of a WebP file (after RIFF + 4-byte little-endian size)
+WEBP_SIGNATURE = b'WEBP'  # bytes 8-11 (after RIFF + 4-byte size)
 
 def is_valid_png(data: bytes) -> bool:
-    """Check PNG magic bytes -- fast, zero cost, no dependencies."""
+    """Check PNG magic bytes."""
     return data[:8] == PNG_SIGNATURE
 
 def is_webp(data: bytes) -> bool:
@@ -754,8 +690,7 @@ def ranked_matches(rom: str, candidates: list[str],
                    threshold: float, top_n: int = 5,
                    _norm_cache: list[tuple[str, str]] | None = None) -> list[tuple[str, float]]:
     """Return up to top_n candidates above threshold, sorted best-first.
-    Pass _norm_cache=build_normalized_candidates(candidates) to avoid
-    re-normalizing the same repo filenames on every call.
+    Pass _norm_cache=build_normalized_candidates(candidates) to avoid re-normalizing on every call.
     """
     rom_low  = rom.lower().strip()
     rom_norm = normalize(rom).lower()
@@ -777,13 +712,8 @@ def ranked_matches(rom: str, candidates: list[str],
 # IMAGEMAGICK
 # =============================================================================
 def find_magick() -> str | None:
-    """Probe for a working ImageMagick binary.
-    Tries 'magick' (v7) then 'convert' (v6) in order.
-    shutil.which() only confirms the binary is on PATH; it cannot detect a
-    broken alias (wrong architecture, missing shared libs, etc.).  We
-    therefore actually execute '<cmd> -version' and accept the command only
-    if it exits cleanly.  This costs one subprocess call at startup but
-    prevents every subsequent resize from failing silently.
+    """Return 'magick' (v7) or 'convert' (v6) if a working ImageMagick binary is found.
+    Runs '<cmd> -version' to verify the binary is functional, not just on PATH.
     """
     for cmd in ("magick", "convert"):
         if not shutil.which(cmd):
@@ -801,11 +731,7 @@ def find_magick() -> str | None:
 
 def magick_resize(magick: str, src: str, dst: str,
                   dims: str = "512x512", gravity: str = "center") -> None:
-    """Letterbox-resize src -> dst at dims (e.g. '512x512', '1920x1080').
-    gravity: ImageMagick gravity value controlling canvas placement.
-             'center' (default) — image centred on black bars (covers, fanart).
-             'East'             — image flush-right (boxart backgrounds).
-    """
+    """Letterbox-resize src → dst. gravity: 'center' (covers/fanart) or 'East' (boxart BGs)."""
     subprocess.run(
         [magick, src, "-resize", dims, "-gravity", gravity,
          "-background", "black", "-extent", dims, dst],
@@ -815,8 +741,7 @@ def magick_resize(magick: str, src: str, dst: str,
 def batch_identify(magick: str, jpg_list: list[Path],
                    chunk_size: int = 200,
                    label: str = "Identifying") -> dict[Path, str | None]:
-    """Return {path: 'WxH' | None} for every jpg in jpg_list.
-    Chunks into batches of chunk_size to stay within Windows 32k CLI limit."""
+    """Return {path: 'WxH' | None} for every jpg. Chunked to stay within Windows CLI limit."""
     dims_map: dict[Path, str | None] = {p: None for p in jpg_list}
     total = len(jpg_list)
     done  = 0
@@ -830,10 +755,7 @@ def batch_identify(magick: str, jpg_list: list[Path],
             for line in result.stdout.splitlines():
                 parts = line.rsplit(" ", 1)
                 if len(parts) == 2:
-                    # Normalize path separators: magick may output forward
-                    # slashes on Windows while dims_map keys use Path objects
-                    # with backslashes.  Path(s) normalizes on construction.
-                    dims_map[Path(parts[0])] = parts[1].strip()
+                    dims_map[Path(parts[0])] = parts[1].strip()  # Path() normalizes separators
         done = min(i + chunk_size, total)
         print(progress_bar(done, total, label=label), end="", flush=True)
     if total:
@@ -841,9 +763,7 @@ def batch_identify(magick: str, jpg_list: list[Path],
     return dims_map
 
 # =============================================================================
-# STEAMGRIDDB — grids (covers), logos, and hero images (backgrounds)
-# API docs : https://www.steamgriddb.com/api/v2
-# Free key : https://www.steamgriddb.com/profile/preferences
+# STEAMGRIDDB  (API docs / free key: steamgriddb.com/api/v2)
 # =============================================================================
 def _sgdb_get_json(url: str, key: str, context: str = "") -> dict | None:
     """Fetch a SGDB JSON endpoint. Returns parsed dict or None on any error."""
@@ -882,10 +802,8 @@ def sgdb_get_cover_url(game_id: int, key: str) -> str | None:
     return None
 
 def sgdb_get_hero_url(game_id: int, key: str) -> str | None:
-    """Return the URL of the best SGDB hero image for game_id, or None.
-    Note: do NOT filter by ?dimensions= — SGDB hero dimensions (1920x620,
-    3840x1240, 1600x650) differ from cover dims and trigger HTTP 400.
-    We take the highest-voted static hero and let magick_resize letterbox it.
+    """Return the best SGDB hero URL for game_id, or None.
+    No ?dimensions= filter — SGDB hero dims differ from cover dims and trigger HTTP 400.
     """
     url = (f"{SGDB_API_BASE}/heroes/game/{game_id}"
            f"?types=static&nsfw=false&humor=false&epilepsy=false")
@@ -895,24 +813,8 @@ def sgdb_get_hero_url(game_id: int, key: str) -> str | None:
     return None
 
 # =============================================================================
-# LAUNCHBOX GAMESDB — offline XML database
-# LaunchBox publishes a complete Metadata.zip at a stable public URL (updated
-# daily).  We download it once and cache an extracted JSON index next to this
-# script — same TTL/cache pattern as the GitHub repo file-list cache.
-#
-# XML schema (inside the zip):
-#   <Game>
-#     <DatabaseID>12345</DatabaseID>
-#     <Name>Mario &amp; Luigi: Dream Team Bros.</Name>
-#   </Game>
-#   <GameImage>
-#     <DatabaseID>12345</DatabaseID>
-#     <FileName>e3752148-0f5a-4f99-b1a9-e0d01fe8364b.jpg</FileName>
-#     <Type>Box - Front</Type>      <!-- or "Fanart - Background" -->
-#     <Region>North America</Region>
-#   </GameImage>
-#
-# Image URL: https://images.launchbox-app.com/{FileName}
+# LAUNCHBOX GAMESDB — offline XML database (Metadata.zip, updated daily)
+# Cached as JSON; image URL: https://images.launchbox-app.com/{FileName}
 # =============================================================================
 
 # LB Region field values → our canonical region keys
@@ -944,16 +846,13 @@ def _lbdb_region_rank(preferred: str) -> dict[str, int]:
     order = [preferred] + [r for r in _LBDB_REGION_PRIORITY if r != preferred]
     return {r: i for i, r in enumerate(order)}
 
-# Image types indexed from LaunchBox — defined at module level so the tuple
-# is not reconstructed on every XML element during the streaming parse.
 _LBDB_INDEXED_TYPES: frozenset[str] = frozenset((
     _LBDB_TYPE_COVER, _LBDB_TYPE_BG, _LBDB_TYPE_LOGO, _LBDB_TYPE_SCREENSHOT,
 ))
 
 def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
-    """Parse Metadata.zip bytes into the in-memory index.
-    Returns: { normalized_name: { img_type: [(region_key, filename), ...] } }
-    Streams via ET.iterparse + zf.open(); elem.clear() keeps memory bounded.
+    """Parse Metadata.zip into { normalized_name: { img_type: [(region_key, filename)] } }.
+    Streams with ET.iterparse; elem.clear() bounds memory.
     """
     index: dict = {}
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -961,9 +860,6 @@ def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
         for xml_name in xml_names:
             db_id_to_norm: dict[str, str] = {}
             try:
-                # zf.open() decompresses on-the-fly; iterparse processes one
-                # element at a time. elem.clear() releases each node immediately
-                # after use so the DOM never grows beyond a single element.
                 for _event, elem in ET.iterparse(zf.open(xml_name), events=("end",)):
                     tag = elem.tag
                     if tag == "Game":
@@ -995,8 +891,7 @@ def _lbdb_parse_zip(zip_bytes: bytes) -> LbIndex:
     return index
 
 def sgdb_get_logo_url(game_id: int, key: str) -> str | None:
-    """Return the URL of the best SteamGridDB logo image for game_id, or None.
-    Logos are transparent PNGs with the game title art — no system logo.
+    """Return the best SteamGridDB logo URL for game_id, or None.
     """
     url = (f"{SGDB_API_BASE}/logos/game/{game_id}"
            f"?types=static&nsfw=false&humor=false&epilepsy=false")
@@ -1072,23 +967,15 @@ def lbdb_find_url(
     preferred_region: str,
     threshold: float = 0.70,
 ) -> str | None:
-    """Offline LaunchBox lookup.
-    1. Normalise rom_stem.
-    2. Exact-match against index keys (O(1)).
-    3. Fuzzy-match against names sharing the first 4-char prefix if no exact hit.
-       (Reduces candidates from ~100k to ~500 — same algorithm as libretro matching.)
-    4. Sort by region preference, return best URL or None.
-    """
+    """Offline LaunchBox lookup: exact match → 4-char prefix fuzzy → region sort."""
     if not lb_index:
         return None
     norm = normalize(strip_tags(rom_stem)).lower().strip()
     if not norm:
         return None
 
-    # 1. Exact match
     entries_by_type = lb_index.get(norm)
 
-    # 2. Fuzzy match with prefix pre-filter
     if entries_by_type is None:
         prefix     = norm[:4]
         candidates = [k for k in lb_index if k[:4] == prefix] or list(lb_index.keys())
@@ -1134,9 +1021,7 @@ def lbdb_find_bg_url(rom_stem: str, lb_index: LbIndex,
 # =============================================================================
 def _http_get(url: str, token: str | None, bearer: bool = False,
               timeout: int = 30, max_retries: int = 3) -> bytes:
-    """Fetch URL with retry on transient errors and optional Bearer/token auth.
-    Retries on: connection errors, HTTP 429, HTTP 5xx.  Raises on 4xx.  Backoff: 2^attempt s.
-    """
+    """Fetch URL with optional auth and retry (429/5xx/network errors). Raises on 4xx."""
     req = urllib.request.Request(url, headers={"User-Agent": "rom-assets-manager-py"})
     if token:
         req.add_header("Authorization", f"{'Bearer' if bearer else 'token'} {token}")
@@ -1165,10 +1050,7 @@ def _http_get(url: str, token: str | None, bearer: bool = False,
 def get_repo_file_list(repo: str, token: str | None,
                        ttl_hours: int, script_stem: str,
                        folder_name: str = "Named_Boxarts") -> list[str]:
-    """Fetch the file list for folder_name inside a libretro-thumbnails repo.
-    Cache key includes folder_name so logos and boxarts stay separate.
-    """
-    # Encode folder_name in cache filename so logos and boxarts cache separately.
+    """Fetch the file list for folder_name in a libretro-thumbnails repo (cached)."""
     folder_tag = "logos" if folder_name == "Named_Logos" else "boxarts"
     cache_dir = Path(tempfile.gettempdir()) / "rom-assets-manager"
     cache_dir.mkdir(exist_ok=True)
@@ -1185,10 +1067,9 @@ def get_repo_file_list(repo: str, token: str | None,
             if age_h < ttl_hours:
                 cprint(C.GRAY, f"  Cache hit: {repo} ({age_h:.1f}h old, TTL {ttl_hours}h)")
                 return data["files"]
-            else:
-                cprint(C.GRAY, f"  Cache expired for {repo} -- refreshing from API")
+            cprint(C.GRAY, f"  Cache expired for {repo} — refreshing from API")
         except Exception:
-            cprint(C.GRAY, f"  Cache unreadable for {repo} -- re-fetching")
+            cprint(C.GRAY, f"  Cache unreadable for {repo} — re-fetching")
 
     cprint(C.GRAY, f"  Fetching file list from GitHub API: {repo} ...")
     url = f"{BASE_API_URL}/{repo}/git/trees/master?recursive=1"
@@ -1213,12 +1094,11 @@ def get_repo_file_list(repo: str, token: str | None,
         for item in parsed["tree"]
         if item["path"].startswith(f"{folder_name}/") and item["path"].endswith(".png")
     ]
-    # Cache write is separate: a write failure should not obscure a successful fetch
     try:
         payload   = {"fetched": datetime.now(timezone.utc).isoformat(), "files": names}
         tmp_cache = cache_path.with_suffix(".tmp")
         tmp_cache.write_text(json.dumps(payload), encoding="utf-8")
-        tmp_cache.replace(cache_path)  # atomic on POSIX, near-atomic on Windows
+        tmp_cache.replace(cache_path)
         cprint(C.GRAY, f"  Found {len(names)} {folder_tag} -- cached to {cache_path.name}")
     except Exception as e:
         cprint(C.YELLOW, f"  WARNING: Could not write cache for {repo}: {e} (continuing without cache)")
@@ -1239,9 +1119,7 @@ def _ensure_art_dir(path: Path, label: str, dry_run: bool) -> None:
         cprint(C.MAGENTA, f"  [DRY RUN] Would create {label} folder: {path}")
 
 def _scan_roms(roms_path: Path) -> dict[str, Path]:
-    """Scan roms_path recursively, return {stem: path}.
-    Skips .sbi files. Warns on duplicate stems (keeps first encountered).
-    """
+    """Scan roms_path recursively; return {stem: path}. Skips .sbi; warns on duplicate stems."""
     result: dict[str, Path] = {}
     for p in roms_path.rglob("*.*"):   # *.*  skips bare directories efficiently
         if not p.is_file() or p.suffix.lower() == ".sbi":
@@ -1259,10 +1137,7 @@ def _scan_roms(roms_path: Path) -> dict[str, Path]:
 # PROMPTS
 # =============================================================================
 def prompt_path(label: str, initial: str = "", must_exist: bool = True) -> str:
-    """Prompt until a non-empty path is entered.
-    When must_exist=True (default), rejects paths that don't exist.
-    When must_exist=False, accepts any non-empty string (path created later).
-    """
+    """Prompt until a non-empty path is entered. Validates existence when must_exist=True."""
     value = initial
     while not value or (must_exist and not Path(value).exists()):
         if value and must_exist and not Path(value).exists():
@@ -1314,29 +1189,25 @@ class Counters:
                  'downloaded', 'skipped', 'converted', 'duplicates')
 
     def __init__(self):
-        self._lock     = threading.Lock()
-        self.renamed   = 0
-        self.deleted   = 0
-        self.missing   = 0
+        self._lock      = threading.Lock()
+        self.renamed    = 0
+        self.deleted    = 0
+        self.missing    = 0
         self.downloaded = 0
-        self.skipped   = 0
-        self.converted = 0
+        self.skipped    = 0
+        self.converted  = 0
         self.duplicates = 0
 
     def inc(self, field: str, n: int = 1):
         with self._lock:
-            # __slots__ prevents silent typo-attribute creation
             setattr(self, field, getattr(self, field) + n)
 
 # =============================================================================
-# SYNC CONFIGURATION  (immutable per-run settings, passed to process_folder)
+# SYNC CONFIGURATION
 # =============================================================================
 @dataclasses.dataclass(frozen=True)
 class SyncConfig:
-    """Immutable settings constant across all system folders in a run.
-    cover_style: "with_logo" | "without_logo" | "game_logo"
-    bg_style   : "fanart" | "boxart"
-    """
+    """Immutable per-run settings passed to all folder processors."""
     dry_run:          bool
     delete_orphans:   bool
     download_mode:    str
@@ -1347,11 +1218,11 @@ class SyncConfig:
     preferred_region: str
     cover_style:      str          # "with_logo" | "without_logo" | "game_logo"
     bg_style:         str          # "fanart" | "boxart"
-    sgdb_key:         str | None   # SteamGridDB API key
-    http_timeout:     int          # per-request HTTP timeout in seconds
+    sgdb_key:         str | None
+    http_timeout:     int
 
 # =============================================================================
-# MATCH RESULTS  (structured return types for pure matching functions)
+# MATCH RESULTS
 # =============================================================================
 @dataclasses.dataclass
 class LibretroMatch:
@@ -1367,7 +1238,7 @@ class LibretroNoMatch:
     hint:     str   # "best='x' score=0.23" | "no files in repo"
 
 # =============================================================================
-# PROGRESS BAR  (stdlib only, \r overwrites same line in terminal)
+# PROGRESS BAR
 # =============================================================================
 def progress_bar(done: int, total: int, width: int = 40, label: str = "") -> str:
     filled = int(width * done / total) if total else width
@@ -1380,15 +1251,7 @@ def progress_bar(done: int, total: int, width: int = 40, label: str = "") -> str
 # =============================================================================
 
 class _ProgressTracker:
-    """Thread-safe (done, total) counter shared across download workers.
-    Avoids the repeated nonlocal + twin-lock pattern in every download function.
-    Usage::
-        tracker = _ProgressTracker(total=len(roms), label="Downloading ")
-        # inside worker (any thread):
-        n, t = tracker.tick()
-        with print_lock:
-            print(progress_bar(n, t, label=tracker.label), end="", flush=True)
-    """
+    """Thread-safe (done, total) counter shared across download workers."""
     __slots__ = ("_lock", "total", "label", "_done")
 
     def __init__(self, total: int, label: str = "") -> None:
@@ -1398,7 +1261,7 @@ class _ProgressTracker:
         self.label = label
 
     def tick(self, n: int = 1) -> tuple[int, int]:
-        """Increment done by n; return (done, total) snapshot under lock."""
+        """Increment done by n; return (done, total)."""
         with self._lock:
             self._done += n
             return self._done, self.total
@@ -1411,11 +1274,7 @@ def _run_thread_pool(
     max_workers: int | None = None,
     interrupt_msg: str = "  Interrupted — cancelling...",
 ) -> None:
-    """Submit ``worker(item)`` for each item via a ThreadPoolExecutor.
-    Caps workers at min(parallel_jobs, max_workers) when max_workers is set.
-    Cancels remaining futures and re-raises on KeyboardInterrupt.
-    Individual worker exceptions propagate through fut.result() unchanged.
-    """
+    """Run worker(item) for each item in a thread pool. Cancels on KeyboardInterrupt."""
     n_workers = min(parallel_jobs, max_workers) if max_workers else parallel_jobs
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = [pool.submit(worker, item) for item in items]
@@ -1451,13 +1310,7 @@ def _reconcile_art_files(
     dims: str = "512x512",
     gravity: str = "center",
 ) -> bool:
-    """Fuzzy-rename cover/background files to match ROM stems.
-    Modifies `existing` in-place for successful renames.
-    Returns True if any rename occurred (caller should re-read the directory).
-    `kind` is used in log messages: "cover" or "background".
-    Renamed files are resized to `dims` immediately so _resize_pass only acts
-    as a safety net for files added outside this tool.
-    """
+    """Fuzzy-rename art files to match ROM stems. Returns True if any rename occurred."""
     mismatched = [s for s in existing if s not in roms]
     did_rename  = False
 
@@ -1473,7 +1326,7 @@ def _reconcile_art_files(
                 if not new_path.exists():
                     print(f"  {C.YELLOW}RENAME{C.RESET}  '{stem}'{path.suffix}"
                           f"  ->  '{new_name}'  (score: {score:.2f})")
-                    shutil.move(str(path), str(new_path))  # shutil.move handles cross-filesystem moves; path.rename does not
+                    shutil.move(str(path), str(new_path))  # shutil.move handles cross-filesystem moves
                     if cfg.magick:
                         try:
                             magick_resize(cfg.magick, str(new_path), str(new_path),
@@ -1532,12 +1385,8 @@ def _write_and_convert(
     dims: str = "512x512",
     gravity: str = "center",
 ) -> None:
-    """Write raw bytes to a temp file, magick-resize to jpg_path, then clean up.
-    Increments counters.downloaded (+1) and counters.converted (+1) on success.
-    Raises subprocess.CalledProcessError if magick fails (tmp cleaned up, counter rolled back).
-    Always runs magick — ensures output is always a correctly-sized JPEG regardless
-    of source format or original resolution.
-    gravity: passed through to magick_resize (see its docstring).
+    """Write raw bytes to a temp file, resize to jpg_path, then clean up.
+    Raises CalledProcessError if magick fails (counter rolled back, tmp removed).
     """
     ext = ".png" if is_valid_png(raw) else (".webp" if is_webp(raw) else ".jpg")
     tmp = work_dir / f"{stem}.tmp{ext}"
@@ -1562,10 +1411,9 @@ def _match_libretro_roms(
     repo_files: list[str],
     cfg: SyncConfig,
 ) -> tuple[list[LibretroMatch], list[LibretroNoMatch], int]:
-    """Match ROMs against the libretro-thumbnails repo.  Pure — no I/O.
+    """Match ROMs against the libretro-thumbnails repo. Pure — no I/O.
     Returns (matches, no_matches, n_skipped).
     """
-    # Pre-normalise once: avoids re-running regexes for every ROM × every candidate
     norm_cache = build_normalized_candidates(repo_files)
     exact_variants: dict[str, list[str]] = defaultdict(list)
     for orig, nc in norm_cache:
@@ -1703,9 +1551,7 @@ def _download_art_batch(
     dims:             str = "512x512",
     gravity:          str = "center",
 ) -> None:
-    """Download covers/backgrounds via libretro-thumbnails with LB + optional SGDB fallbacks.
-    dims/gravity: passed to _write_and_convert (use 1920x1080/East for boxart backgrounds).
-    """
+    """Download covers/backgrounds via libretro-thumbnails with LB + SGDB fallbacks."""
     _direct = direct_roms or []
     lb_idx  = lb_index or {}
     magick  = cfg.magick
@@ -1719,7 +1565,7 @@ def _download_art_batch(
         jpg_path   = item.jpg_path
         candidates = item.candidates
 
-        # Step 1: SGDB primary — try before libretro when key is set
+        # Step 1: SGDB (primary when key is set)
         if sgdb_fn and cfg.sgdb_key:
             game_id = sgdb_search_game(rom_stem, cfg.sgdb_key)
             if game_id:
@@ -1793,7 +1639,7 @@ def _download_art_batch(
                                   f"download failed ({len(candidates)} candidate(s) tried)"))
 
     def _worker_direct(rom_stem: str) -> None:
-        """ROMs that skip libretro: try sgdb_fn first, then lb_fallback_finder."""
+        """ROMs with no libretro match: try sgdb_fn then lb_fallback_finder."""
         jpg_path = covers_path / f"{rom_stem}.jpg"
         url = _find_fallback_url(
             rom_stem, lb_idx, cfg,
@@ -2142,68 +1988,48 @@ def process_bg_folder(folder: str, roms_path: Path, bgs_path: Path,
 # CRC32 DUPLICATE DETECTION
 # =============================================================================
 ROM_EXTENSIONS = {
-    # Nintendo cartridge / handheld
-    ".nes",                          # NES
-    ".fds",                          # Famicom Disk System
-    ".sfc", ".smc",                  # SNES (headered/headerless — see _smc_header_offset)
-    ".vb",                           # Virtual Boy
-    ".gb", ".gbc", ".gba",           # Game Boy / Color / Advance
-    ".nds",                          # Nintendo DS
-    ".3ds", ".cci",                  # Nintendo 3DS (dump / raw cartridge image)
-    # Nintendo disc / flash
-    ".gcz",                          # GameCube / Wii — Dolphin GCZ compression
-    ".rvz",                          # GameCube / Wii — Dolphin RVZ compression
-    ".wbfs",                         # Wii Backup File System
-    ".xci",                          # Nintendo Switch cartridge image
-    # Nintendo 64
-    ".n64", ".z64", ".v64",          # N64 (little-endian / big-endian / byte-swapped)
-    # Sega cartridge / handheld
-    ".md", ".smd", ".gen",           # Mega Drive / Genesis
-    ".32x",                          # Sega 32X
-    ".gg", ".sms",                   # Game Gear / Master System
-    # Sega disc
-    ".cdi",                          # Dreamcast — DiscJuggler image
-    # .gdi excluded — it is a plain-text track descriptor (sidecar), not ROM data
-    # Sony handheld
-    ".pbp", ".cso",                  # PSP (EBOOT / compressed ISO)
-    # NEC
-    ".pce",                          # PC Engine / TurboGrafx-16
-    # SNK handheld
+    # Nintendo
+    ".nes", ".fds",
+    ".sfc", ".smc",                  # SNES (headerless/headered — see _smc_header_offset)
+    ".vb",
+    ".gb", ".gbc", ".gba",
+    ".nds",
+    ".3ds", ".cci",
+    ".gcz", ".rvz", ".wbfs",        # GameCube / Wii
+    ".xci", ".nsp", ".nsz",         # Switch
+    ".n64", ".z64", ".v64",         # N64 byte-order variants
+    # Sega
+    ".md", ".smd", ".gen",
+    ".32x",
+    ".gg", ".sms",
+    ".cdi",                          # Dreamcast (.gdi excluded — text sidecar)
+    # Sony
+    ".pbp", ".cso",                  # PSP
+    # NEC / SNK
+    ".pce",
     ".ngp", ".ngc",                  # Neo Geo Pocket / Color
-    # Atari cartridge
-    ".a26",                          # Atari 2600
-    ".a52",                          # Atari 5200
-    ".a78",                          # Atari 7800
-    ".j64",                          # Atari Jaguar
-    ".lnx",                          # Atari Lynx
-    # Other cartridge systems
-    ".ws", ".wsc",                   # WonderSwan / Color
-    ".col",                          # ColecoVision
-    ".vec",                          # Vectrex
-    # Generic / multi-system disc formats
-    ".iso",                          # ISO 9660 disc image
-    ".bin",                          # raw sector image (PSX, Saturn, Redbook...)
-    # .cue excluded — it is a plain-text cue sheet (sidecar), not ROM data
-    ".img",                          # raw sector image
-    ".ecm",                          # ECM-compressed disc image
-    ".chd",                          # Compressed Hunks of Data (MAME, RetroArch)
-    # Catch-all
-    ".rom",                          # generic cartridge dump
+    # Atari
+    ".a26", ".a52", ".a78",
+    ".j64", ".lnx",
+    # Other
+    ".ws", ".wsc",
+    ".col", ".vec",
+    # Generic disc/multi-system
+    ".iso",
+    ".bin",                          # raw sector image (.cue excluded — text sidecar)
+    ".img", ".ecm", ".chd",
+    ".rom",
 }
 
 # =============================================================================
 # NAME-BASED DEDUPLICATION & FILENAME NORMALISATION
 # =============================================================================
-# ── normalize_roms helpers ────────────────────────────────────────────────────
 
 _NRM_ARTICLE_RE = re.compile(r',\s*(The|A|An)$', re.IGNORECASE)
 _NRM_DISC_RE    = re.compile(r'[\(\[](Disc|Disk|CD)\s*\d+[\)\]]', re.IGNORECASE)
 
 def normalize_filename(filename: str) -> str:
-    """Return a clean-titled version of a ROM filename.
-    Strips all parenthetical/bracketed tags except disc number.
-    Moves trailing articles to the front: 'Zelda, The' -> 'The Zelda'.
-    """
+    """Strip all tags except disc number; move trailing articles to the front."""
     base, ext = os.path.splitext(filename)
     base = re.sub(r'_\d+$', '', base)
     base = re.sub(r"_s\b", "'s", base, flags=re.IGNORECASE)
@@ -2218,7 +2044,7 @@ def normalize_filename(filename: str) -> str:
     return title + disc_tag + ext
 
 def collect_renames(folder_path: str) -> list[tuple[str, str]]:
-    """Walk folder and return list of (old_path, new_path) where name changed."""
+    """Walk folder; return [(old_path, new_path)] for files whose name would change."""
     renames = []
     for dirpath, _, filenames in os.walk(folder_path):
         for filename in filenames:
@@ -2230,8 +2056,7 @@ def collect_renames(folder_path: str) -> list[tuple[str, str]]:
                 ))
     return renames
 
-# ── dedupe_roms helpers ───────────────────────────────────────────────────────
-# File extensions that are never ROMs — skipped during name-based grouping.
+# Non-ROM extensions skipped during name-based grouping.
 _DEDUP_NON_ROM_EXTS: frozenset[str] = frozenset({
     '.sav', '.srm', '.state', '.sta',
     '.ss0', '.ss1', '.ss2', '.ss3', '.ss4', '.ss5', '.ss6', '.ss7', '.ss8', '.ss9',
@@ -2240,7 +2065,7 @@ _DEDUP_NON_ROM_EXTS: frozenset[str] = frozenset({
     '.m3u',
 })
 
-# Generation families: systems in the same family share many multiplatform titles.
+# Generation families for cross-system exclusives filtering.
 _DEDUP_DEFAULT_FAMILIES: dict[str, list[str]] = {
     "8bit":      ["NES", "SMS", "MasterSystem", "Famicom"],
     "16bit":     ["SegaGenesis", "Genesis", "MegaDrive", "SNES", "SuperNintendo", "PCEngine", "TG16"],
@@ -2261,10 +2086,7 @@ def detect_family(system_name: str,
     return None, []
 
 def normalize_basename(filename: str) -> str:
-    """Normalize a ROM filename to a bare title key for grouping.
-    Strips extension, all tags, leading/trailing articles, lowercases.
-    e.g. 'Aladdin (USA) (Rev A).gbc' -> 'aladdin'
-    """
+    """Strip extension, tags, and articles; lowercase. e.g. 'Aladdin (USA).gbc' → 'aladdin'."""
     return _norm_for_dedup(os.path.splitext(filename)[0])
 
 def get_files_by_basename(folder_path: str) -> dict[str, list[str]]:
@@ -2305,7 +2127,7 @@ def _dedup_filter_excluded(paths: list[str], excludes: list[str]) -> list[str]:
                                         for ex in excludes)]
 
 def _dedup_is_multidisc(paths: list[str]) -> bool:
-    """True if every file has a distinct disc/cd number tag — not a real duplicate."""
+    """True if every file has a distinct disc number tag (not a duplicate)."""
     pattern = re.compile(r'[\(\[](Disc|Disk|CD)\s*\d+[\)\]]', re.IGNORECASE)
     tags = [pattern.search(os.path.basename(p)) for p in paths]
     if not all(tags):
@@ -2373,7 +2195,7 @@ def delete_name_duplicates(
     use_label: bool = False,
     keep_from: str | None = None,
 ) -> int:
-    """Interactive per-group deletion for name-based duplicate groups."""
+    """Interactive deletion for name-based duplicate groups. Returns deleted count."""
     total = 0
     if ext_preference is None:
         ext_preference = {}
@@ -2472,37 +2294,21 @@ _companion_detect_family      = detect_family
 _companion_DEFAULT_FAMILIES   = _DEDUP_DEFAULT_FAMILIES
 
 # =============================================================================
-# Multi-track disc dumps (.bin/.cue) contain CDDA audio tracks alongside the
-# data track. Audio tracks are named "… (Track N).bin" or "… Track N.bin".
-# They are raw PCM and can be byte-identical across different games (same-
-# length silence, shared audio libraries, identical music), so they must be
-# excluded from duplicate detection entirely — they are not game data.
+# CDDA audio tracks ("Track N.bin") are raw PCM and can be byte-identical
+# across unrelated games — excluded from duplicate detection.
 _CDDA_TRACK_RE = re.compile(r'\btrack\s*\d+\b', re.IGNORECASE)
 
-# Disc-number tag pattern: "(Disc 1)", "(Disc 2)", "(CD1)", "(CD2)", etc.
-# Used by Stage 4 to detect multi-disc games and exclude them from suspected-
-# duplicate reporting — Disc 1 and Disc 2 are parts of one game, not copies.
+# Disc-number tag for multi-disc detection in Stage 4.
 _DISC_TAG_RE = re.compile(r'\b(?:disc|disk|cd)\s*\d+\b', re.IGNORECASE)
 
-# Sidecar extensions: companion metadata files, not standalone ROM data.
-# SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
-# prepended to the raw ROM data.  The header is not part of the game content,
-# so two identical ROMs — one headered (.smc) and one headerless (.sfc or a
-# clean .smc) — differ in file size by exactly 512 bytes and would never be
-# grouped together by the size-based Stage 1 filter without normalisation.
-#
-# Detection rule (from the SNES ROM spec):
-#   size % 1024 == 512  AND  extension in _SMC_HEADER_EXTS  AND  size > 512
-# The size > 512 guard prevents a degenerate 512-byte file (not a real ROM)
-# from being stripped down to 0 bytes.
+# SNES copier header: 512 bytes prepended to ROM data (size % 1024 == 512).
+# Without normalisation, headered and headerless copies differ in size and
+# would never be grouped in Stage 1.
 _SMC_HEADER_SIZE: int       = 512
 _SMC_HEADER_EXTS: frozenset = frozenset({".smc", ".sfc"})
 
 def _smc_header_offset(path: Path, size: int) -> int:
-    """Return 512 if path looks like a headered SNES ROM, else 0.
-    Used by both the Stage-1 size normalisation and the Stage-2 hash to ensure
-    both steps agree on which bytes represent the actual ROM content.
-    """
+    """Return 512 if path is a headered SNES ROM, else 0."""
     return (
         _SMC_HEADER_SIZE
         if (size > _SMC_HEADER_SIZE
@@ -2511,49 +2317,33 @@ def _smc_header_offset(path: Path, size: int) -> int:
         else 0
     )
 
-# ---------------------------------------------------------------------------
-# Hashing helpers
-# ---------------------------------------------------------------------------
 def _hash_file(path: Path, offset: int = 0,
                chunk_size: int = 1 << 20) -> tuple[str, str] | None:
-    """Read path once (skipping leading `offset` bytes), computing CRC32 + SHA-1.
-    offset: bytes to skip at the start of the file (e.g. SMC copier header).
-            Must be obtained from _smc_header_offset() so Stage 1 and Stage 2
-            always agree on the effective ROM content.
-    Returns (crc32_hex, sha1_hex) or None on any read error.
+    """Compute (crc32_hex, sha1_hex) for path, skipping leading offset bytes.
+    Returns None on any error.
     """
-    # Single outer guard: returns None on ANY failure (I/O, FIPS init, etc.)
     try:
         crc = 0
-        # usedforsecurity=False: SHA-1 used for deduplication, not cryptography.
-        # Required on FIPS-enabled systems (RHEL/CentOS); kwarg added in Python 3.9.
         try:
-            sha = hashlib.sha1(usedforsecurity=False)
-        except TypeError:  # Python 3.8 lacks the kwarg
+            sha = hashlib.sha1(usedforsecurity=False)  # usedforsecurity: FIPS compat (Python 3.9+)
+        except TypeError:
             sha = hashlib.sha1()
         with open(path, "rb") as f:
             if offset:
-                f.seek(offset)  # skip copier header — not part of ROM content
+                f.seek(offset)
             while chunk := f.read(chunk_size):
                 crc = zlib.crc32(chunk, crc)
                 sha.update(chunk)
         return f"{crc & 0xFFFFFFFF:08X}", sha.hexdigest().upper()
-    except Exception:  # OSError, MemoryError, unexpected hashlib error, etc.
+    except Exception:
         return None
 
 def _build_suspected(eligible_files: list[Path],
                      confirmed_paths: set[Path],
                      file_sizes: dict[Path, int]) -> list[list[Path]]:
-    """Return groups of files that share a normalized title but differ in content.
-    eligible_files should already exclude empty and unreadable files.
-    Exclusion rules (applied in order):
-      1. Files already flagged as confirmed hash-duplicates are skipped.
-      2. Grouping key is (compact_stem, extension) — cross-extension groups
-         (same title, different hardware) are never formed.
-      3. Size-ratio guard: if the largest file in a group is more than 2×
-         the smallest, the group is skipped (different games, not variants).
-      4. Multi-disc filter: every member has a distinct disc-number tag →
-         one multi-disc game, not duplicates.
+    """Return groups that share a normalized title but differ in content.
+    Groups are skipped if: already confirmed duplicates, size ratio >2×,
+    or all members have distinct disc-number tags (multi-disc game).
     """
     name_groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
     for p in eligible_files:
@@ -2562,9 +2352,7 @@ def _build_suspected(eligible_files: list[Path],
         norm_name = _norm_for_dedup(p.stem)
         if not norm_name:
             continue
-        # Compact key strips all non-alphanumeric so spacing/punctuation
-        # variants ("ChoroQ" vs "Choro Q") land in the same bucket.
-        compact = _NONALNUM_RE.sub("", norm_name)
+        compact = _NONALNUM_RE.sub("", norm_name)  # "Choro Q" == "ChoroQ"
         key = (compact, p.suffix.lower())
         name_groups[key].append(p)
 
@@ -2572,14 +2360,11 @@ def _build_suspected(eligible_files: list[Path],
     for paths in name_groups.values():
         if len(paths) < 2:
             continue
-        # Size-ratio guard: files whose sizes differ by more than 2× are
-        # almost certainly different games, not regional/revision variants.
+        # Size >2× difference → almost certainly different games
         if file_sizes:
             sizes = [file_sizes[p] for p in paths if p in file_sizes]
             if sizes and max(sizes) > 2 * min(sizes):
                 continue
-        # Multi-disc filter: if every file has a disc tag and all disc
-        # numbers are distinct, this is one multi-disc game, not duplicates.
         disc_nums = []
         for p in paths:
             m = _DISC_TAG_RE.search(p.stem)
@@ -2593,15 +2378,13 @@ def _build_suspected(eligible_files: list[Path],
     return suspected
 
 def _build_size_similar(
-    by_size: dict[int, list[tuple[Path, int, int]]],
+    by_size:        dict[int, list[tuple[Path, int, int]]],
     confirmed_paths: set[Path],
     suspected_paths: set[Path],
     threshold: float = 0.70,
 ) -> list[list[Path]]:
-    """Surface same-size pairs whose names are similar but normalize differently.
-    Catches cases like 'Digimon Adventure 6' vs 'Digimon Adventure 2001':
-    Uses union-find for correct connected-component grouping: if A~B and B~C,
-    all three end up in the same group even if A!~C.
+    """Surface same-size pairs with similar but differently-normalized names.
+    Uses union-find for connected-component grouping (A~B and B~C → {A,B,C}).
     """
     new_groups: list[list[Path]] = []
     for entries in by_size.values():
@@ -2615,12 +2398,11 @@ def _build_size_similar(
         for paths in by_ext.values():
             if len(paths) < 2:
                 continue
-            # Union-Find for correct connected-component grouping.
             parent = list(range(len(paths)))
 
             def find(x: int) -> int:
                 while parent[x] != x:
-                    parent[x] = parent[parent[x]]  # path compression
+                    parent[x] = parent[parent[x]]
                     x = parent[x]
                 return x
 
@@ -2640,19 +2422,8 @@ def _build_size_similar(
 def check_duplicates(roms_base: Path, common: list[str],
                      single_system: bool, parallel_jobs: int,
                      dry_run: bool = True) -> None:
-    """
-    Four-stage duplicate detection:
-      1. Group by file size    (free — stat() already needed for reporting)
-      2. CRC32 + SHA-1 on size-candidates only  (skip unique-size files)
-      3. Confirm by (size, CRC32, SHA-1) agreement
-      4. Name-based fuzzy matching: group remaining files by normalize(stem)
-         to surface same-title pairs that differ at the byte level
-         (e.g. regional variants, NTSC/PAL conversions, patched ROMs).
-    Empty files (size == 0) are reported separately as broken/placeholder ROMs
-    rather than being falsely grouped as duplicates of each other.
-    A file is only reported as an exact duplicate when size + CRC32 + SHA-1 all agree.
-    After the report, _report_duplicates prompts the user interactively to clean up.
-    dry_run: when True the deletion prompt still shows but no files are removed.
+    """Four-stage duplicate detection: size → CRC32 → SHA-1 → same-title name matching.
+    Exact duplicates require size+CRC32+SHA-1 agreement. Empty files reported separately.
     """
     print()
     cprint(C.CYAN, "=============================================")
@@ -2670,11 +2441,9 @@ def check_duplicates(roms_base: Path, common: list[str],
         if not rom_dir.exists():
             cprint(C.YELLOW, f"  WARNING: folder not found, skipping: {rom_dir}")
             continue
-        for p in rom_dir.rglob("*.*"):   # *.*  skips bare directories efficiently
+        for p in rom_dir.rglob("*.*"):
             if p.is_file() and p.suffix.lower() in ROM_EXTENSIONS:
-                # Skip CDDA audio tracks — they are raw PCM, not game data,
-                # and can be byte-identical across unrelated games.
-                if _CDDA_TRACK_RE.search(p.stem):
+                if _CDDA_TRACK_RE.search(p.stem):  # skip CDDA audio tracks
                     continue
                 all_rom_files.append(p)
 
@@ -2686,18 +2455,14 @@ def check_duplicates(roms_base: Path, common: list[str],
     print()
 
     # ------------------------------------------------------------------
-    # Stage 1: group by normalised size (free — no I/O beyond stat)
-    # SNES ROMs can carry a 512-byte copier header (see _smc_header_offset).
-    # Grouping by raw size would place a headered and a headerless copy of the
-    # same ROM in different buckets, silently skipping the hash comparison.
-    # We group by the normalised (header-stripped) size instead, and store the
-    # offset alongside each path so Stage 2 hashes the same ROM content.
+    # Stage 1: group by normalized size.
+    # Groups by header-stripped size so headered/headerless SNES copies
+    # are compared (see _smc_header_offset).
     # ------------------------------------------------------------------
     cprint(C.GRAY, "  Stage 1/4 — grouping by file size...")
-    empty_files: list[Path]       = []
-    unreadable:  list[Path]       = []
-    # key = normalised size; value = list of (path, raw_size, header_offset)
-    by_size: dict[int, list[tuple[Path, int, int]]] = defaultdict(list)
+    empty_files: list[Path] = []
+    unreadable:  list[Path] = []
+    by_size: dict[int, list[tuple[Path, int, int]]] = defaultdict(list)  # norm_sz → [(path, raw_sz, offset)]
 
     for p in all_rom_files:
         try:
@@ -2708,11 +2473,10 @@ def check_duplicates(roms_base: Path, common: list[str],
         if sz == 0:
             empty_files.append(p)
         else:
-            offset   = _smc_header_offset(p, sz)
-            norm_sz  = sz - offset          # effective ROM content size
+            offset  = _smc_header_offset(p, sz)
+            norm_sz = sz - offset
             by_size[norm_sz].append((p, sz, offset))
 
-    # Only files sharing their normalised size with ≥1 other file need hashing
     size_candidates: list[tuple[Path, int, int]] = [
         (p, sz, off)
         for entries in by_size.values() if len(entries) > 1
@@ -2751,7 +2515,6 @@ def check_duplicates(roms_base: Path, common: list[str],
     total      = len(size_candidates)
 
     def hash_one(path: Path, raw_size: int, offset: int) -> None:
-        # offset from _smc_header_offset — skips copier header if present
         hashes = _hash_file(path, offset=offset)
         norm_sz = raw_size - offset
         with hash_lock:
@@ -2770,7 +2533,7 @@ def check_duplicates(roms_base: Path, common: list[str],
                 except Exception as e:
                     cprint(C.YELLOW, f"  WARNING: hash error: {e}")
                 finally:
-                    done_count += 1  # main-thread only: as_completed drives this loop
+                    done_count += 1
                     dc = done_count
                     print(progress_bar(dc, total, label="Hashing   "), end="", flush=True)
         except KeyboardInterrupt:
@@ -2781,9 +2544,7 @@ def check_duplicates(roms_base: Path, common: list[str],
     print()  # newline after progress bar
 
     # ------------------------------------------------------------------
-    # Stage 3: SHA-1 confirmation — group by (size, crc32, sha1)
-    # Any bucket where 2+ files share size+CRC32+SHA-1 is a true duplicate.
-    # CRC32-only matches that differ on SHA-1 are reported as near-collisions.
+    # Stage 3: SHA-1 confirmation (size+CRC32+SHA-1 → exact duplicate)
     # ------------------------------------------------------------------
     cprint(C.GRAY, "  Stage 3/4 — confirming by SHA-1...")
     confirmed:      list[list[tuple[Path, str, str, int]]] = []  # (path, crc32, sha1, size)
@@ -2801,21 +2562,15 @@ def check_duplicates(roms_base: Path, common: list[str],
             confirmed.append(group)
             confirmed_paths_here.update(p for p, _, _, _ in group)
         if len(sha_groups) > 1:
-            # Same size+CRC32 but different SHA-1 — CRC32 collision, not duplicate
-            # Exclude paths already reported as confirmed duplicates
+            # Same size+CRC32 but different SHA-1 → CRC32 collision, not a duplicate
             nc_paths = [p for g in sha_groups.values() for p, _, _, _ in g
                         if p not in confirmed_paths_here]
             if nc_paths:
                 near_collisions.append((sz, crc, nc_paths))
 
     # ------------------------------------------------------------------
-    # Stage 4: name-based fuzzy detection for same-title, different-ROM pairs
-    # Example: "Asterix.smc" (PAL) and "Asterix (NTSC).smc" (NTSC conversion)
-    # share the same game but differ at the byte level, so the hash pipeline
-    # above correctly does NOT flag them as content duplicates.  However the
-    # user likely still wants to know they have two copies of the same title.
-    # See _build_suspected() for full exclusion rules (sidecar files, cross-
-    # platform same-title, multi-disc games).
+    # Stage 4: name-based fuzzy detection (same title, different bytes)
+    # Surfaces regional/revision pairs like "Asterix.smc" vs "Asterix (NTSC).smc".
     # ------------------------------------------------------------------
     confirmed_paths: set[Path] = {p for g in confirmed for p, _, _, _ in g}
     empty_set  = set(empty_files)
@@ -2844,10 +2599,7 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                        unreadable: list[Path],
                        all_rom_files: list[Path],
                        dry_run: bool = True) -> None:
-    """Print the final duplicate report, then prompt the user to delete if duplicates exist.
-    confirmed: list of groups, each is [(path, crc32_hex, sha1_hex, size_bytes), ...]
-    suspected: list of groups whose normalized names match but bytes differ.
-    """
+    """Print the duplicate report and prompt for deletion."""
 
     if empty_files:
         cprint(C.YELLOW, f"  {len(empty_files)} empty (0-byte) file(s) — likely corrupt or placeholder:")
@@ -2921,16 +2673,10 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
     if not confirmed and not suspected:
         return
 
-    # ------------------------------------------------------------------
-    # Interactive deletion prompts — only when stdout is a real terminal.
-    # Piped/redirected runs (CI, scripts) skip silently so they never block.
-    # ------------------------------------------------------------------
     if not sys.stdout.isatty():
-        return
+        return  # skip interactive prompts in piped/CI contexts
 
     if confirmed:
-        # Convert (path, crc, sha, size) tuples to plain Path lists for the
-        # shared deletion helper (CRC/SHA are not needed for the deletion flow).
         confirmed_paths_only = [[p for p, _, _, _ in g] for g in confirmed]
         _prompt_delete_group("CLEANUP — EXACT DUPLICATES", confirmed_paths_only, dry_run)
 
@@ -2941,35 +2687,24 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
                "  Review carefully — you may want to keep both versions.")
         _prompt_delete_group("CLEANUP — SAME-TITLE PAIRS", suspected, dry_run)
 
-# Keep-strategy sort keys — operate on plain Path objects.
-# Each returns (primary_sort_key, name) so the first element after sorting
-# is the file to KEEP.
-# Region priority for strategy 5: lower rank = preferred (kept first).
-# Mirrors the region-preference logic already used for cover-art lookup.
+# Keep-strategy sort keys: first element after sorting is the file to KEEP.
 _REGION_KEEP_PRIORITY: dict[str, int] = {
-    "usa":    0,   # North America — most complete localised release
-    "world":  1,   # Multi-region release
-    "europe": 2,
-    "japan":  3,
+    "usa": 0, "world": 1, "europe": 2, "japan": 3,
 }
 
 def _region_keep_key(p: Path) -> tuple:
     r = region_of(p.name) or ""
-    rank = _REGION_KEEP_PRIORITY.get(r, 99)   # unknown region = last
-    return (rank, len(p.name), p.name)
+    return (_REGION_KEEP_PRIORITY.get(r, 99), len(p.name), p.name)
 
-# Tags that always identify an inferior ROM when a clean copy exists in the
-# same group.  Matched case-insensitively inside any (...) or [...] tag.
-# Sourced from GoodTools conventions + No-Intro common tags.
+# Bad-dump / pre-release tags (GoodTools + No-Intro). Auto-deleted when a clean copy exists.
 _BAD_TAG_RE = re.compile(
     r'[\(\[]\s*(?:Beta|Demo|Proto(?:type)?|Sample|Hack|b|h|t|o)\s*[\d.]*\s*[\)\]]',
     re.IGNORECASE,
 )
 
 def _split_bad_tags(group: list[Path]) -> tuple[list[Path], list[Path]]:
-    """Return (clean, bad) splitting the group on _BAD_TAG_RE.
-    If ALL files are bad-tagged, everything is returned as clean (keep them
-    all for manual review — nothing obviously superior to keep).
+    """Return (clean, bad) split on _BAD_TAG_RE.
+    If all are bad-tagged, returns (group, []) — nothing obviously superior.
     """
     clean = [p for p in group if not _BAD_TAG_RE.search(p.name)]
     bad   = [p for p in group if     _BAD_TAG_RE.search(p.name)]
@@ -2989,15 +2724,7 @@ _KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple] | None"]] = {
 def _prompt_delete_group(title: str,
                          groups: list[list[Path]],
                          dry_run: bool) -> None:
-    """Shared deletion prompt used for both exact-duplicate and same-title groups.
-    Flow:
-      1. Ask how to handle: review per-group, auto-strategy, or skip.
-      2. If auto: ask which keep-strategy to apply uniformly.
-         If review: prompt per group interactively.
-      3. Preview every KEEP / DELETE decision.
-      4. Final confirmation before touching any file.
-    dry_run: shows the full flow but never removes files.
-    """
+    """Interactive deletion prompt: review/auto-strategy/skip → preview → confirm."""
     print()
     cprint(C.CYAN, "─" * 45)
     cprint(C.CYAN, f"  {title}")
@@ -3015,20 +2742,14 @@ def _prompt_delete_group(title: str,
     per_group = action_ch == "r"
     print()
 
-    # ── Bad-tag pre-filter ────────────────────────────────────────────
-    # Split each group into clean copies and obviously inferior ones
-    # (Beta, Demo, Proto, GoodTools bad-dump [b]/[h]/[t]/[o]).
-    # Bad-tagged files are auto-scheduled for deletion when at least one
-    # clean copy exists, so the strategy below only needs to pick among
-    # the clean copies.
+    # Bad-tag pre-filter: auto-schedule Beta/Demo/Proto/hack files for deletion.
     auto_delete: list[Path] = []
     filtered_groups: list[list[Path]] = []
     for group in groups:
         clean, bad = _split_bad_tags(group)
         auto_delete.extend(bad)
         if len(clean) > 1:
-            filtered_groups.append(clean)   # still needs strategy selection
-        # len(clean) == 1: only one clean copy — nothing left to decide
+            filtered_groups.append(clean)
 
     if auto_delete:
         cprint(C.DYELLOW,
@@ -3037,11 +2758,7 @@ def _prompt_delete_group(title: str,
         for p in sorted(auto_delete):
             cprint(C.YELLOW, f"    AUTO-DELETE  {p.name}  ({p.parent})")
         print()
-    # ── Extension-conflict resolution ─────────────────────────────────
-    # Groups where the same game title exists in multiple formats
-    # (e.g. .smc headered vs .sfc clean) get a one-time format question
-    # per unique extension pair.  Files of the rejected format are added to
-    # auto_delete; the survivors go on to the strategy picker.
+    # Extension conflicts (e.g. .smc vs .sfc): one-time format question per pair.
     if filtered_groups:
         ext_pref: dict[frozenset[str], str | None] = {}
         resolved: list[list[Path]] = []
@@ -3185,10 +2902,8 @@ def _prompt_delete_group(title: str,
 # ROM COMPLETENESS CHECKER
 # Independent of check_duplicates — _hash_file and _dat_crc32 must never mix.
 # =============================================================================
-# Extensions supported for DAT CRC matching.  Intentionally narrower than
-# ROM_EXTENSIONS: completeness checking is scoped to cartridge systems only.
-# Disc-based systems require multi-file verification (cue+bin, TOC, etc.)
-# which is out of scope for this feature.
+# Narrower than ROM_EXTENSIONS: cartridge systems only.
+# Disc systems (cue+bin, TOC, etc.) need multi-file verification — out of scope.
 _DAT_ROM_EXTENSIONS: frozenset[str] = frozenset({
     ".nes", ".fds",        # NES / Famicom Disk System
     ".sfc", ".smc",        # SNES (headerless / headered)
@@ -3198,9 +2913,8 @@ _DAT_ROM_EXTENSIONS: frozenset[str] = frozenset({
     ".md", ".smd", ".gen", # Sega Mega Drive / Genesis (raw / SMD interleaved)
 })
 
-# No-Intro retail filter — exclude pre-release, unlicensed, hacks, bad dumps.
-# Covers the modern No-Intro parenthesized convention and the older GoodTools
-# bracket convention still present in some community-maintained DAT files.
+# No-Intro retail filter — excludes pre-release, unlicensed, hacks, bad dumps.
+# Covers both modern No-Intro parenthesized tags and legacy GoodTools bracket tags.
 _DAT_RETAIL_PAREN_RE: re.Pattern = re.compile(
     r'\((?:Beta(?:[- ]\d+)?|Proto(?:type)?|Alpha|Demo|Sample|Unl|Unlicensed|Hack)\)',
     re.IGNORECASE,
@@ -3236,21 +2950,14 @@ class DatGame:
 # Retail filter
 # ---------------------------------------------------------------------------
 def _is_retail(name: str) -> bool:
-    """Return True if game name passes the retail filter.
-    Rejects Beta, Proto(type), Alpha, Demo, Sample, Unlicensed (Unl), Hack
-    parenthesized tags and GoodTools bad-dump [b], hack [h*], trainer [t],
-    pirated [p], overdump [o] bracket tags.
-    """
+    """Return True if the game name passes the retail filter (no pre-release/hack/bad-dump tags)."""
     return (
         not _DAT_RETAIL_PAREN_RE.search(name)
         and not _DAT_RETAIL_BRACKET_RE.search(name)
     )
 
 def _smd_deinterleave(data: bytes) -> bytes:
-    """Convert SMD-interleaved bytes to raw Mega Drive ROM bytes.
-    For each 16 KB block: first 8 KB → odd-addressed bytes, second 8 KB → even-addressed.
-    Uses bytearray extended-slice assignment for O(n) throughput.  Works on partial final blocks.
-    """
+    """Convert SMD-interleaved bytes to raw Mega Drive ROM bytes (16 KB blocks)."""
     if not data:
         return b""
     result = bytearray(len(data))
@@ -3261,48 +2968,34 @@ def _smd_deinterleave(data: bytes) -> bytes:
         if half == 0:
             result[block_start] = block[0]
             continue
-        # block[:half]  = odd-addressed bytes  → odd  positions in output
-        # block[half:]  = even-addressed bytes → even positions in output
-        result[block_start     : block_start + blen : 2] = block[half:]   # even pos
-        result[block_start + 1 : block_start + blen : 2] = block[:half]   # odd  pos
+        result[block_start     : block_start + blen : 2] = block[half:]   # even positions
+        result[block_start + 1 : block_start + blen : 2] = block[:half]   # odd  positions
     return bytes(result)
 
 # ---------------------------------------------------------------------------
-# DAT-matchable CRC32 computation
-# Used ONLY by check_completeness.  Never call from check_duplicates — the two
-# features compute CRC32 for different purposes (_hash_file vs _dat_crc32).
+# DAT-matchable CRC32 — used ONLY by check_completeness (never by check_duplicates).
 # ---------------------------------------------------------------------------
 def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
-    """Return the No-Intro DAT-matchable CRC32 for a ROM file, or None on error.
-    Strips format-specific headers before hashing:
-      .nes  — 16-byte iNES header; +512-byte trainer when flags6 bit 2 is set.
-      .fds  — 16-byte fwNES header when magic b"FDS\\x1a" is present.
-      .smc/.sfc — 512-byte SMC copier header when size % 1024 == 512.
-      .smd  — 512-byte SMD header, then de-interleaves 16 KB blocks.
-      others — raw CRC32 from byte 0.
-    Returns uppercase 8-char zero-padded hex (e.g. "B19ED489"), or None on error.
+    """Return the No-Intro DAT-matchable CRC32 (uppercase 8-char hex) for a ROM, or None on error.
+    Strips format-specific headers (.nes iNES, .fds fwNES, .smc/.sfc SMC copier, .smd SMD).
     """
     try:
         ext = path.suffix.lower()
 
-        # ── .smd — must de-interleave, so load whole file into memory ───────
-        # Genesis / Mega Drive ROMs are bounded (practical max ~4 MB).
+        # .smd must be fully loaded for de-interleaving.
         if ext == ".smd":
             raw = path.read_bytes()
-            # SMD header detection: bytes 8–9 must be 0xAA 0xBB.
-            # Files with .smd extension but without this marker are treated as
-            # raw binary (some dumpers write plain .smd without interleaving).
+            # SMD header: bytes 8–9 == 0xAA 0xBB; absent → treat as raw binary.
             if len(raw) >= 512 and len(raw) >= 10 and raw[8] == 0xAA and raw[9] == 0xBB:
                 payload = _smd_deinterleave(raw[512:])
             else:
                 payload = raw
             return f"{zlib.crc32(payload) & 0xFFFFFFFF:08X}"
 
-        # ── All other formats: determine byte offset, then stream ────────────
         offset = 0
 
         if ext == ".nes":
-            # iNES magic: b"NES\x1a" at offset 0.  Flags byte at offset 6.
+            # iNES: 16-byte header (magic b"NES\x1a"); +512 bytes if trainer flag set.
             try:
                 with open(path, "rb") as _f:
                     hdr = _f.read(16)
@@ -3313,7 +3006,7 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
                 offset = 16 + (512 if trainer else 0)
 
         elif ext == ".fds":
-            # fwNES header: magic b"FDS\x1a" at offset 0, 16 bytes total.
+            # fwNES: 16-byte header (magic b"FDS\x1a").
             try:
                 with open(path, "rb") as _f:
                     hdr = _f.read(4)
@@ -3323,7 +3016,7 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
                 offset = 16
 
         elif ext in (".smc", ".sfc"):
-            # SMC copier header: present when size % 1024 == 512 and size > 512.
+            # SMC copier header: 512 bytes when size % 1024 == 512.
             try:
                 size = path.stat().st_size
             except OSError:
@@ -3331,7 +3024,6 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
             if size > 512 and size % 1024 == 512:
                 offset = 512
 
-        # Stream the file, skipping 'offset' leading bytes.
         crc = 0
         with open(path, "rb") as f:
             if offset:
@@ -4091,8 +3783,6 @@ def _wiz_cover_options(
 ) -> tuple[str, str, str, str]:
     """Wizard steps 8-9: prompt for cover style, region, bg style, and SGDB key.
     Returns (cover_style, preferred_region, sgdb_key, bg_style).
-    Contains all branching logic for cover and background styles so _wizard
-    stays at a high level.
     """
     cover_style      = "with_logo"
     preferred_region = "any"
@@ -4216,8 +3906,7 @@ def _wizard(
     print()
 
     if task_ch == "h":
-        # Print the module docstring (lines 2-45 of the script source).
-        # __doc__ is the canonical source — no file I/O needed.
+        # Print the module docstring (__doc__) — no file I/O needed.
         print(__doc__)
         sys.exit(0)
 
@@ -4490,9 +4179,9 @@ def _wizard(
 
     # ── 12. Confirm ───────────────────────────────────────────────────
     task_label = {
-        "3": "covers + backgrounds",
-        "4": "covers only",
-        "5": "backgrounds only",
+        "5": "covers + backgrounds",
+        "6": "covers only",
+        "7": "backgrounds only",
     }[task_ch]
 
     confirm_opts = _wiz_build_confirm_opts(
@@ -4533,7 +4222,7 @@ def _wizard(
     )
 
     _run_sync(
-        task        = {"3":"both","4":"covers","5":"backgrounds"}[task_ch],
+        task        = {"5":"both","6":"covers","7":"backgrounds"}[task_ch],
         roms_base   = roms_base,
         covers_base = covers_base,
         bgs_base    = bgs_base,
@@ -4594,8 +4283,7 @@ def main() -> None:
                         choices=["any", "usa", "europe", "japan", "world"],
                         help="Preferred cover region (default: any)")
     parser.add_argument("--sgdb-key",         default=os.environ.get("SGDB_KEY", ""),
-                        help="SteamGridDB API key (prefer SGDB_KEY env var — "
-                             "passing secrets on the CLI exposes them in process lists and shell history).")
+                        help="SteamGridDB API key (prefer SGDB_KEY env var over CLI to avoid leaking in process lists).")
     parser.add_argument("--check-duplicates", action="store_true",
                         help="Scan ROMs for duplicates (runs instead of cover sync)")
     parser.add_argument("--check-completeness", action="store_true",
@@ -4605,10 +4293,9 @@ def main() -> None:
                              "(required with --check-completeness)")
     parser.add_argument("--completeness-region", default="usa",
                         choices=["usa", "europe", "japan", "japan_exclusive", "all"],
-                        help="Region mode for completeness check (default: usa). "
-                             "usa/europe/japan apply a 1G1R filter. "
-                             "japan_exclusive selects games never released in USA/Europe/World. "
-                             "all returns every retail entry with no 1G1R.")
+                        help="Region/1G1R mode for completeness check (default: usa). "
+                             "japan_exclusive = never released in USA/Europe/World. "
+                             "all = every retail entry, no 1G1R.")
     parser.add_argument("--want-list",         action="store_true",
                         help="Save a plain-text list of MISSING titles alongside the CSV "
                              "(used with --check-completeness)")
@@ -4622,8 +4309,7 @@ def main() -> None:
     parser.add_argument("--http-timeout",     type=int,   default=30,
                         help="HTTP request timeout in seconds (default 30)")
     parser.add_argument("--github-token",     default=os.environ.get("GITHUB_TOKEN", ""),
-                        help="GitHub personal access token (prefer GITHUB_TOKEN env var — "
-                             "passing secrets on the CLI exposes them in process lists and shell history).")
+                        help="GitHub personal access token (prefer GITHUB_TOKEN env var over CLI to avoid leaking in process lists).")
     parser.add_argument("--report",           default="",
                         help="Report file path. Defaults to rom-assets-manager_report_YYYYMMDD_HHMMSS.txt "
                              "next to the script. Pass 'none' to disable.")
