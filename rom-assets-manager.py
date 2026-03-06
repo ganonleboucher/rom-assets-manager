@@ -7,9 +7,9 @@ rom-assets-manager.py
   Cross-platform (Windows / Linux / macOS) · Python 3.8+ · no external pip deps
   Run with no arguments for the interactive wizard, or --help for CLI options.
 
-━━━━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━���━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   WIZARD TASKS
-━━━━━━━━━━━━━━━━━━��━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   [1] Check duplicate ROMs (hash-based)
         Four-stage pipeline: group by size → CRC32 → SHA-1 → same-title name
         matching. Byte-identical files are confirmed exact duplicates.
@@ -67,7 +67,7 @@ rom-assets-manager.py
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   KEY CLI FLAGS  (non-wizard use)
-━��━━━━━━━━━━━━━━━━━━━━━━━━━━━���━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   --roms <dir>              ROMs root folder
   --covers <dir>            Covers root folder
   --backgrounds <dir>       Backgrounds root folder
