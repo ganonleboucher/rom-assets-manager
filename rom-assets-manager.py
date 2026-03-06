@@ -1579,10 +1579,6 @@ def _match_libretro_roms(
 
     for rom_stem in roms_to_dl:
         jpg_path = covers_path / f"{rom_stem}.jpg"
-        if cfg.download_mode == "missing" and jpg_path.exists():
-            n_skipped += 1
-            continue
-
         rom_norm   = normalize(rom_stem).lower()
         exact_hits = exact_variants.get(rom_norm)
         if exact_hits:
@@ -3002,9 +2998,9 @@ def _split_bad_tags(group: list[Path]) -> tuple[list[Path], list[Path]]:
 
 _KEEP_STRATEGIES: dict[str, tuple[str, "Callable[[Path], tuple] | None"]] = {
     "1": ("shortest filename",                        lambda p: (len(p.name), p.name)),
-    "2": ("smallest file size",                       lambda p: (p.stat().st_size if p.exists() else 0, p.name)),
-    "3": ("oldest file",                              lambda p: (p.stat().st_mtime if p.exists() else 0, p.name)),
-    "4": ("newest file",                              lambda p: (-p.stat().st_mtime if p.exists() else 0, p.name)),
+    "2": ("smallest file size",                       lambda p: (p.stat().st_size, p.name)),
+    "3": ("oldest file",                              lambda p: (p.stat().st_mtime, p.name)),
+    "4": ("newest file",                              lambda p: (-p.stat().st_mtime, p.name)),
     "5": ("preferred region (USA > World > Europe > Japan)", _region_keep_key),
     "6": ("choose per group (interactive)",           None),
 }
@@ -3538,6 +3534,11 @@ def check_completeness(
     cprint(C.CYAN, "=============================================")
     print()
 
+    # ── Validate ROM folder first (fast) before doing any expensive DAT work ──
+    if not rom_dir.is_dir():
+        cprint(C.DRED, f"  ERROR: ROM folder not found: {rom_dir}")
+        sys.exit(1)
+
     # ── Parse DAT ────────────────────────────────────────────────────────────
     cprint(C.GRAY, f"  Parsing DAT: {dat_path.name}")
     try:
@@ -3577,9 +3578,6 @@ def check_completeness(
     dat_by_crc: dict[str, DatGame] = {g.crc32: g for g in target_games}
 
     # ── Scan ROM folder ──────────────────────────────────────────────────────
-    if not rom_dir.is_dir():
-        cprint(C.DRED, f"  ERROR: ROM folder not found: {rom_dir}")
-        sys.exit(1)
 
     rom_files: list[Path] = sorted(
         p for p in rom_dir.rglob("*")
