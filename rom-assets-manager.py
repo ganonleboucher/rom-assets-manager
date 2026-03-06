@@ -495,7 +495,6 @@ def _sniff_rom_header(path: Path) -> str | None:
 
 def _profile_folder_contents(rom_dir: Path) -> tuple[str, str]:
     """Inspect files in rom_dir to infer the system. Returns (system_key, tier).
-
     Tier 3a — extension profiling: count unambiguous extensions; the system with
               ≥60% of all counted votes wins.
     Tier 3b — header sniffing: read magic bytes from up to 5 ambiguous files;
@@ -694,7 +693,6 @@ _ARTICLE_LEAD_RE  = re.compile(r'^(?:the|a|an)\s+',  re.IGNORECASE)
 
 def _norm_for_dedup(stem: str) -> str:
     """Normalize a ROM stem for same-title grouping in duplicate detection.
-
     Unlike normalize() (cover-art lookup), this also strips leading/trailing
     articles so that 'The Legend of Zelda' and 'Legend of Zelda, The' map to
     the same key and get grouped as potential same-title duplicates.
@@ -1917,7 +1915,6 @@ def _download_bg_images(
 # =============================================================================
 # ORCHESTRATORS
 # =============================================================================
-
 def process_folder(folder: str, roms_path: Path, covers_path: Path,
                    cfg: SyncConfig,
                    repo_files: list[str], repo_name: str,
@@ -2197,7 +2194,6 @@ ROM_EXTENSIONS = {
 # =============================================================================
 # NAME-BASED DEDUPLICATION & FILENAME NORMALISATION
 # =============================================================================
-
 # ── normalize_roms helpers ────────────────────────────────────────────────────
 
 _NRM_ARTICLE_RE = re.compile(r',\s*(The|A|An)$', re.IGNORECASE)
@@ -2235,7 +2231,6 @@ def collect_renames(folder_path: str) -> list[tuple[str, str]]:
     return renames
 
 # ── dedupe_roms helpers ───────────────────────────────────────────────────────
-
 # File extensions that are never ROMs — skipped during name-based grouping.
 _DEDUP_NON_ROM_EXTS: frozenset[str] = frozenset({
     '.sav', '.srm', '.state', '.sta',
@@ -2490,8 +2485,6 @@ _CDDA_TRACK_RE = re.compile(r'\btrack\s*\d+\b', re.IGNORECASE)
 _DISC_TAG_RE = re.compile(r'\b(?:disc|disk|cd)\s*\d+\b', re.IGNORECASE)
 
 # Sidecar extensions: companion metadata files, not standalone ROM data.
-
-
 # SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
 # prepended to the raw ROM data.  The header is not part of the game content,
 # so two identical ROMs — one headered (.smc) and one headerless (.sfc or a
@@ -2500,7 +2493,6 @@ _DISC_TAG_RE = re.compile(r'\b(?:disc|disk|cd)\s*\d+\b', re.IGNORECASE)
 #
 # Detection rule (from the SNES ROM spec):
 #   size % 1024 == 512  AND  extension in _SMC_HEADER_EXTS  AND  size > 512
-#
 # The size > 512 guard prevents a degenerate 512-byte file (not a real ROM)
 # from being stripped down to 0 bytes.
 _SMC_HEADER_SIZE: int       = 512
@@ -2553,7 +2545,6 @@ def _build_suspected(eligible_files: list[Path],
                      confirmed_paths: set[Path],
                      file_sizes: dict[Path, int]) -> list[list[Path]]:
     """Return groups of files that share a normalized title but differ in content.
-
     eligible_files should already exclude empty and unreadable files.
     Exclusion rules (applied in order):
       1. Files already flagged as confirmed hash-duplicates are skipped.
@@ -2601,7 +2592,6 @@ def _build_suspected(eligible_files: list[Path],
 
     return suspected
 
-
 def _build_size_similar(
     by_size: dict[int, list[tuple[Path, int, int]]],
     confirmed_paths: set[Path],
@@ -2609,12 +2599,7 @@ def _build_size_similar(
     threshold: float = 0.70,
 ) -> list[list[Path]]:
     """Surface same-size pairs whose names are similar but normalize differently.
-
     Catches cases like 'Digimon Adventure 6' vs 'Digimon Adventure 2001':
-    Stage 1 groups them by size, Stage 3 cannot confirm (different bytes),
-    and Stage 4 misses them because their normalized keys differ.
-    The size constraint makes false positives extremely unlikely.
-
     Uses union-find for correct connected-component grouping: if A~B and B~C,
     all three end up in the same group even if A!~C.
     """
@@ -2651,7 +2636,6 @@ def _build_size_similar(
                 if len(component) >= 2:
                     new_groups.append(sorted(component))
     return new_groups
-
 
 def check_duplicates(roms_base: Path, common: list[str],
                      single_system: bool, parallel_jobs: int,
@@ -2703,7 +2687,6 @@ def check_duplicates(roms_base: Path, common: list[str],
 
     # ------------------------------------------------------------------
     # Stage 1: group by normalised size (free — no I/O beyond stat)
-    #
     # SNES ROMs can carry a 512-byte copier header (see _smc_header_offset).
     # Grouping by raw size would place a headered and a headerless copy of the
     # same ROM in different buckets, silently skipping the hash comparison.
@@ -2827,7 +2810,6 @@ def check_duplicates(roms_base: Path, common: list[str],
 
     # ------------------------------------------------------------------
     # Stage 4: name-based fuzzy detection for same-title, different-ROM pairs
-    #
     # Example: "Asterix.smc" (PAL) and "Asterix (NTSC).smc" (NTSC conversion)
     # share the same game but differ at the byte level, so the hash pipeline
     # above correctly does NOT flag them as content duplicates.  However the
@@ -2962,7 +2944,6 @@ def _report_duplicates(confirmed: list[list[tuple[Path, str, str, int]]],
 # Keep-strategy sort keys — operate on plain Path objects.
 # Each returns (primary_sort_key, name) so the first element after sorting
 # is the file to KEEP.
-#
 # Region priority for strategy 5: lower rank = preferred (kept first).
 # Mirrors the region-preference logic already used for cover-art lookup.
 _REGION_KEEP_PRIORITY: dict[str, int] = {
@@ -3009,14 +2990,12 @@ def _prompt_delete_group(title: str,
                          groups: list[list[Path]],
                          dry_run: bool) -> None:
     """Shared deletion prompt used for both exact-duplicate and same-title groups.
-
     Flow:
       1. Ask how to handle: review per-group, auto-strategy, or skip.
       2. If auto: ask which keep-strategy to apply uniformly.
          If review: prompt per group interactively.
       3. Preview every KEEP / DELETE decision.
       4. Final confirmation before touching any file.
-
     dry_run: shows the full flow but never removes files.
     """
     print()
@@ -3058,7 +3037,6 @@ def _prompt_delete_group(title: str,
         for p in sorted(auto_delete):
             cprint(C.YELLOW, f"    AUTO-DELETE  {p.name}  ({p.parent})")
         print()
-
     # ── Extension-conflict resolution ─────────────────────────────────
     # Groups where the same game title exists in multiple formats
     # (e.g. .smc headered vs .sfc clean) get a one-time format question
@@ -3207,7 +3185,6 @@ def _prompt_delete_group(title: str,
 # ROM COMPLETENESS CHECKER
 # Independent of check_duplicates — _hash_file and _dat_crc32 must never mix.
 # =============================================================================
-
 # Extensions supported for DAT CRC matching.  Intentionally narrower than
 # ROM_EXTENSIONS: completeness checking is scoped to cartridge systems only.
 # Disc-based systems require multi-file verification (cue+bin, TOC, etc.)
@@ -3246,7 +3223,6 @@ _COMPLETENESS_REGION_LABELS: dict[str, str] = {
 _SMD_BLOCK_SIZE: int = 16_384   # 16 KB per interleaved block
 _SMD_HALF_SIZE:  int = _SMD_BLOCK_SIZE // 2   # 8 KB per half
 
-
 @dataclasses.dataclass(frozen=True)
 class DatGame:
     """One cartridge entry from a No-Intro Logiqx XML DAT file.
@@ -3256,13 +3232,11 @@ class DatGame:
     crc32:    str
     clone_of: str
 
-
 # ---------------------------------------------------------------------------
 # Retail filter
 # ---------------------------------------------------------------------------
 def _is_retail(name: str) -> bool:
     """Return True if game name passes the retail filter.
-
     Rejects Beta, Proto(type), Alpha, Demo, Sample, Unlicensed (Unl), Hack
     parenthesized tags and GoodTools bad-dump [b], hack [h*], trainer [t],
     pirated [p], overdump [o] bracket tags.
@@ -3272,10 +3246,8 @@ def _is_retail(name: str) -> bool:
         and not _DAT_RETAIL_BRACKET_RE.search(name)
     )
 
-
 def _smd_deinterleave(data: bytes) -> bytes:
     """Convert SMD-interleaved bytes to raw Mega Drive ROM bytes.
-
     For each 16 KB block: first 8 KB → odd-addressed bytes, second 8 KB → even-addressed.
     Uses bytearray extended-slice assignment for O(n) throughput.  Works on partial final blocks.
     """
@@ -3295,7 +3267,6 @@ def _smd_deinterleave(data: bytes) -> bytes:
         result[block_start + 1 : block_start + blen : 2] = block[:half]   # odd  pos
     return bytes(result)
 
-
 # ---------------------------------------------------------------------------
 # DAT-matchable CRC32 computation
 # Used ONLY by check_completeness.  Never call from check_duplicates — the two
@@ -3303,14 +3274,12 @@ def _smd_deinterleave(data: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
     """Return the No-Intro DAT-matchable CRC32 for a ROM file, or None on error.
-
     Strips format-specific headers before hashing:
       .nes  — 16-byte iNES header; +512-byte trainer when flags6 bit 2 is set.
       .fds  — 16-byte fwNES header when magic b"FDS\\x1a" is present.
       .smc/.sfc — 512-byte SMC copier header when size % 1024 == 512.
       .smd  — 512-byte SMD header, then de-interleaves 16 KB blocks.
       others — raw CRC32 from byte 0.
-
     Returns uppercase 8-char zero-padded hex (e.g. "B19ED489"), or None on error.
     """
     try:
@@ -3374,7 +3343,6 @@ def _dat_crc32(path: Path, chunk_size: int = 1 << 20) -> str | None:
     except Exception:
         return None
 
-
 # ---------------------------------------------------------------------------
 # Logiqx XML DAT parser
 # ---------------------------------------------------------------------------
@@ -3423,7 +3391,6 @@ def parse_dat(dat_path: Path) -> list[DatGame]:
 
     return games
 
-
 # ---------------------------------------------------------------------------
 # 1G1R selection and region filtering
 # ---------------------------------------------------------------------------
@@ -3436,7 +3403,6 @@ def _build_parent_groups(games: list[DatGame]) -> dict[str, list[DatGame]]:
         key = game.clone_of if game.clone_of else game.name
         groups[key].append(game)
     return dict(groups)
-
 
 def _pick_best_in_group(group: list[DatGame],
                         region_priority: list[str]) -> DatGame:
@@ -3451,7 +3417,6 @@ def _pick_best_in_group(group: list[DatGame],
         return priority_index.get(r, sentinel) if r else sentinel
 
     return min(group, key=_rank)
-
 
 # Per-mode configuration: which regions include a group, which exclude it,
 # and the 1G1R priority list.  Defined at module level to avoid
@@ -3475,13 +3440,11 @@ _MODE_PRIORITY: dict[str, list[str]] = {
     "japan_exclusive": ["japan"],
 }
 
-
 def _filter_and_select(
     games: list[DatGame],
     region_mode: str,
 ) -> list[DatGame]:
     """Apply retail filter then select entries by region_mode.
-
     usa/europe/japan: 1G1R — groups with a matching or World release, best region picked.
     japan_exclusive:  groups where NO member has a USA/EUR/World release.
     all:              all retail entries, no 1G1R.
@@ -3511,7 +3474,6 @@ def _filter_and_select(
 
     return result
 
-
 # ---------------------------------------------------------------------------
 # Completeness checker — main entry point
 # ---------------------------------------------------------------------------
@@ -3523,7 +3485,6 @@ def check_completeness(
     want_list:   bool = False,
 ) -> None:
     """Check a ROM folder against a No-Intro Logiqx XML DAT file.
-
     Writes a timestamped CSV (FOUND/MISSING/UNUSED) next to the script and
     prints a terminal summary.  want_list=True also writes a plain-text list
     of MISSING titles.  region_mode: "usa"|"europe"|"japan"|"japan_exclusive"|"all".
@@ -3623,7 +3584,6 @@ def check_completeness(
         system_name   = rom_dir.name,
     )
 
-
 def _report_completeness(
     found:        list[tuple[DatGame, Path]],
     missing:      list[DatGame],
@@ -3700,14 +3660,11 @@ def _report_completeness(
             cprint(C.GRAY,  "  (no want-list written — collection is complete!)")
     print()
 
-
 def _detect_systems(roms_base: Path, system_arg: str,
                     rom_ext_filter: set[str] | None = None) -> tuple[list[str], bool]:
     """Return (common, single_system) based on roms_base layout and --system arg.
-
     common        : list of system-folder names (or [system] in single mode)
     single_system : True when ROMs live directly in roms_base (no subfolders)
-
     rom_ext_filter: if given, used to detect ROM files in base dir (duplicate mode);
                     if None, any non-.sbi file counts (cover-sync mode).
     """
@@ -3831,7 +3788,6 @@ def _print_counters_block(
         cprint(C.DRED, f"  Deleted (or would) : {counters.deleted}")
     else:
         cprint(C.RED,  f"  Unmatched kept     : {counters.missing}")
-
 
 def _print_summary(
     counters: Counters,
