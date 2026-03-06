@@ -670,10 +670,12 @@ def sort_by_region(candidates: list[tuple[str, float]],
 # =============================================================================
 # FUZZY MATCHING
 # =============================================================================
-_TAG_RE    = re.compile(r"\s*[\(\[].*?[\)\]]")
-_SEQNUM_RE = re.compile(r"_\d+$")   # strips trailing _1, _2 ... so "Game_1" matches the cover for "Game"
-_WORD_RE   = re.compile(r"\W+")       # word tokenizer for Jaccard scoring
-_WS_RE     = re.compile(r"\s+")       # whitespace collapser for strip_tags
+_TAG_RE         = re.compile(r"\s*[\(\[].*?[\)\]]")
+_SEQNUM_RE      = re.compile(r"_\d+$")   # strips trailing _1, _2 ... so "Game_1" matches the cover for "Game"
+_WORD_RE        = re.compile(r"\W+")       # word tokenizer for Jaccard scoring
+_WS_RE          = re.compile(r"\s+")       # whitespace collapser for strip_tags
+_SUBTITLE_SEP_RE = re.compile(r"\s+-\s+") # subtitle separator: "Title - Subtitle" → "Title Subtitle"
+_NONALNUM_RE    = re.compile(r"[^a-z0-9]") # compact key: strip all non-alphanumeric for grouping
 
 def strip_tags(name: str) -> str:
     """Remove parenthesized/bracketed tags (region, revision, etc.) and collapse whitespace."""
@@ -699,6 +701,7 @@ def _norm_for_dedup(stem: str) -> str:
     """
     s = strip_tags(stem)               # strip (USA), (Rev A), [!], etc.
     s = _SEQNUM_RE.sub("", s)         # strip trailing _1, _2 copy numbers
+    s = _SUBTITLE_SEP_RE.sub(" ", s)  # "Hot Wheels - Turbo Racing" → "Hot Wheels Turbo Racing"
     s = _ARTICLE_TRAIL_RE.sub("", s)  # "Legend of Zelda, The" -> "Legend of Zelda"
     s = _ARTICLE_LEAD_RE.sub("", s)   # "The Legend of Zelda"  -> "Legend of Zelda"
     return s.strip().lower()
@@ -2167,7 +2170,7 @@ ROM_EXTENSIONS = {
     ".gg", ".sms",                   # Game Gear / Master System
     # Sega disc
     ".cdi",                          # Dreamcast — DiscJuggler image
-    ".gdi",                          # Dreamcast — GD-ROM track descriptor
+    # .gdi excluded — it is a plain-text track descriptor (sidecar), not ROM data
     # Sony handheld
     ".pbp", ".cso",                  # PSP (EBOOT / compressed ISO)
     # NEC
@@ -2186,7 +2189,8 @@ ROM_EXTENSIONS = {
     ".vec",                          # Vectrex
     # Generic / multi-system disc formats
     ".iso",                          # ISO 9660 disc image
-    ".bin", ".cue",                  # raw/cue-sheet pair (PSX, Saturn, Redbook...)
+    ".bin",                          # raw sector image (PSX, Saturn, Redbook...)
+    # .cue excluded — it is a plain-text cue sheet (sidecar), not ROM data
     ".img",                          # raw sector image
     ".ecm",                          # ECM-compressed disc image
     ".chd",                          # Compressed Hunks of Data (MAME, RetroArch)
@@ -2490,9 +2494,7 @@ _CDDA_TRACK_RE = re.compile(r'\btrack\s*\d+\b', re.IGNORECASE)
 _DISC_TAG_RE = re.compile(r'\b(?:disc|disk|cd)\s*\d+\b', re.IGNORECASE)
 
 # Sidecar extensions: companion metadata files, not standalone ROM data.
-# Excluded from Stage 4 name-grouping to prevent .cue from being grouped
-# with its paired .bin and reported as a suspected same-title duplicate.
-_SIDECAR_EXTS: frozenset = frozenset({".cue", ".sbi", ".m3u", ".gdi"})
+
 
 # SNES ROMs ripped with a copier (e.g. Super Magicom) have a 512-byte header
 # prepended to the raw ROM data.  The header is not part of the game content,
@@ -2551,37 +2553,44 @@ def _hash_file(path: Path, offset: int = 0,
     except Exception:  # OSError, MemoryError, unexpected hashlib error, etc.
         return None
 
-def _build_suspected(all_rom_files: list[Path],
-                     confirmed_paths: set[Path]) -> list[list[Path]]:
+def _build_suspected(eligible_files: list[Path],
+                     confirmed_paths: set[Path],
+                     file_sizes: dict[Path, int]) -> list[list[Path]]:
     """Return groups of files that share a normalized title but differ in content.
 
+    eligible_files should already exclude empty and unreadable files.
     Exclusion rules (applied in order):
       1. Files already flagged as confirmed hash-duplicates are skipped.
-      2. Sidecar extensions (.cue, .sbi, .m3u, .gdi) are skipped — they are
-         companion metadata files, not standalone ROMs.
-      3. Grouping key is (normalized_stem, extension) so a Game Gear .gg and a
-         Mega Drive .smd with the same game title are never grouped together —
-         they are different games on different hardware.
-      4. Any group where every member contains a disc-number tag (Disc 1, CD2…)
-         and no two members share the same disc number is a multi-disc game,
-         not a collection of duplicates, and is excluded.
+      2. Grouping key is (compact_stem, extension) — cross-extension groups
+         (same title, different hardware) are never formed.
+      3. Size-ratio guard: if the largest file in a group is more than 2×
+         the smallest, the group is skipped (different games, not variants).
+      4. Multi-disc filter: every member has a distinct disc-number tag →
+         one multi-disc game, not duplicates.
     """
     name_groups: dict[tuple[str, str], list[Path]] = defaultdict(list)
-    for p in all_rom_files:
+    for p in eligible_files:
         if p in confirmed_paths:
-            continue
-        if p.suffix.lower() in _SIDECAR_EXTS:
             continue
         norm_name = _norm_for_dedup(p.stem)
         if not norm_name:
             continue
-        key = (norm_name, p.suffix.lower())
+        # Compact key strips all non-alphanumeric so spacing/punctuation
+        # variants ("ChoroQ" vs "Choro Q") land in the same bucket.
+        compact = _NONALNUM_RE.sub("", norm_name)
+        key = (compact, p.suffix.lower())
         name_groups[key].append(p)
 
     suspected: list[list[Path]] = []
     for paths in name_groups.values():
         if len(paths) < 2:
             continue
+        # Size-ratio guard: files whose sizes differ by more than 2× are
+        # almost certainly different games, not regional/revision variants.
+        if file_sizes:
+            sizes = [file_sizes[p] for p in paths if p in file_sizes]
+            if sizes and max(sizes) > 2 * min(sizes):
+                continue
         # Multi-disc filter: if every file has a disc tag and all disc
         # numbers are distinct, this is one multi-disc game, not duplicates.
         disc_nums = []
@@ -2595,6 +2604,57 @@ def _build_suspected(all_rom_files: list[Path],
         suspected.append(sorted(paths))
 
     return suspected
+
+
+def _build_size_similar(
+    by_size: dict[int, list[tuple[Path, int, int]]],
+    confirmed_paths: set[Path],
+    suspected_paths: set[Path],
+    threshold: float = 0.70,
+) -> list[list[Path]]:
+    """Surface same-size pairs whose names are similar but normalize differently.
+
+    Catches cases like 'Digimon Adventure 6' vs 'Digimon Adventure 2001':
+    Stage 1 groups them by size, Stage 3 cannot confirm (different bytes),
+    and Stage 4 misses them because their normalized keys differ.
+    The size constraint makes false positives extremely unlikely.
+
+    Uses union-find for correct connected-component grouping: if A~B and B~C,
+    all three end up in the same group even if A!~C.
+    """
+    new_groups: list[list[Path]] = []
+    for entries in by_size.values():
+        if len(entries) < 2:
+            continue
+        by_ext: dict[str, list[Path]] = defaultdict(list)
+        for p, _, _ in entries:
+            if p in confirmed_paths or p in suspected_paths:
+                continue
+            by_ext[p.suffix.lower()].append(p)
+        for paths in by_ext.values():
+            if len(paths) < 2:
+                continue
+            # Union-Find for correct connected-component grouping.
+            parent = list(range(len(paths)))
+
+            def find(x: int) -> int:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]  # path compression
+                    x = parent[x]
+                return x
+
+            for i in range(len(paths)):
+                for j in range(i + 1, len(paths)):
+                    if find(i) != find(j) and similarity(paths[i].stem, paths[j].stem) >= threshold:
+                        parent[find(i)] = find(j)
+
+            components: dict[int, list[Path]] = defaultdict(list)
+            for i, p in enumerate(paths):
+                components[find(i)].append(p)
+            for component in components.values():
+                if len(component) >= 2:
+                    new_groups.append(sorted(component))
+    return new_groups
 
 
 def check_duplicates(roms_base: Path, common: list[str],
@@ -2690,7 +2750,11 @@ def check_duplicates(roms_base: Path, common: list[str],
     if not size_candidates:
         # No exact-size candidates, but name-based matches may still exist.
         confirmed_paths: set[Path] = set()
-        suspected = _build_suspected(all_rom_files, confirmed_paths)
+        empty_set  = set(empty_files)
+        unread_set = set(unreadable)
+        file_sizes = {p: norm_sz for norm_sz, entries in by_size.items() for p, _, _ in entries}
+        eligible   = [p for p in all_rom_files if p not in empty_set and p not in unread_set]
+        suspected  = _build_suspected(eligible, confirmed_paths, file_sizes)
         print()
         _report_duplicates([], suspected, empty_files, unreadable, all_rom_files, dry_run=dry_run)
         return
@@ -2776,7 +2840,13 @@ def check_duplicates(roms_base: Path, common: list[str],
     # platform same-title, multi-disc games).
     # ------------------------------------------------------------------
     confirmed_paths: set[Path] = {p for g in confirmed for p, _, _, _ in g}
-    suspected = _build_suspected(all_rom_files, confirmed_paths)
+    empty_set  = set(empty_files)
+    unread_set = set(unreadable)
+    file_sizes = {p: norm_sz for norm_sz, entries in by_size.items() for p, _, _ in entries}
+    eligible   = [p for p in all_rom_files if p not in empty_set and p not in unread_set]
+    suspected  = _build_suspected(eligible, confirmed_paths, file_sizes)
+    suspected_paths: set[Path] = {p for g in suspected for p in g}
+    suspected.extend(_build_size_similar(by_size, confirmed_paths, suspected_paths))
 
     print()
     if near_collisions:
@@ -2945,8 +3015,9 @@ def _prompt_delete_group(title: str,
     """Shared deletion prompt used for both exact-duplicate and same-title groups.
 
     Flow:
-      1. Ask whether to delete at all (skip if user says no).
-      2. Ask which file to keep per group (uniform strategy).
+      1. Ask how to handle: review per-group, auto-strategy, or skip.
+      2. If auto: ask which keep-strategy to apply uniformly.
+         If review: prompt per group interactively.
       3. Preview every KEEP / DELETE decision.
       4. Final confirmation before touching any file.
 
@@ -2958,13 +3029,15 @@ def _prompt_delete_group(title: str,
     cprint(C.CYAN, "─" * 45)
     print()
 
-    delete_ch = prompt_choice("  Delete the extras?", {
-        "y": f"{C.RED}Yes{C.RESET} — keep one per group, delete the rest",
-        "n": f"{C.GREEN}No{C.RESET}  — leave everything in place",
+    action_ch = prompt_choice("  What would you like to do?", {
+        "r": f"{C.CYAN}Review each group{C.RESET}  — choose which file to keep per group",
+        "a": f"{C.YELLOW}Auto-select{C.RESET}        — apply a keep-strategy to all groups",
+        "n": f"{C.GREEN}Skip{C.RESET}               — leave everything in place",
     })
-    if delete_ch == "n":
+    if action_ch == "n":
         cprint(C.GRAY, "  No files were changed.")
         return
+    per_group = action_ch == "r"
     print()
 
     # ── Bad-tag pre-filter ────────────────────────────────────────────
@@ -3028,13 +3101,18 @@ def _prompt_delete_group(title: str,
                 resolved.append(group)
         filtered_groups = resolved
 
-    plan: list[tuple[Path, list[Path]]] = []
+    plan: list[tuple[list[Path], list[Path]]] = []
     strategy_label = ""
     if filtered_groups:
-        strat_ch = prompt_choice("  Which file to keep from each group?", {
-            k: f"{C.CYAN}{lbl}{C.RESET}" for k, (lbl, _) in _KEEP_STRATEGIES.items()
-        })
-        strategy_label, sort_key = _KEEP_STRATEGIES[strat_ch]
+        if per_group:
+            strategy_label = "choose per group"
+            sort_key = None
+        else:
+            auto_strategies = {k: v for k, v in _KEEP_STRATEGIES.items() if k != "6"}
+            strat_ch = prompt_choice("  Which file to keep from each group?", {
+                k: f"{C.CYAN}{lbl}{C.RESET}" for k, (lbl, _) in auto_strategies.items()
+            })
+            strategy_label, sort_key = _KEEP_STRATEGIES[strat_ch]
         print()
 
         if sort_key is None:
@@ -3049,29 +3127,43 @@ def _prompt_delete_group(title: str,
                     print(f"    [{i}] {p.name}  ({sz:,} bytes)  ({p.parent})")
                 while True:
                     try:
-                        raw = input(f"  Keep which? (1-{len(group)}, s=skip): ").strip().lower()
+                        raw = input(f"  Keep which? (1-{len(group)}, or e.g. 1,3 to keep multiple, s=skip): ").strip().lower()
                     except KeyboardInterrupt:
                         print()
                         raise
                     if raw == 's':
                         break
-                    if raw.isdigit() and 1 <= int(raw) <= len(group):
-                        keep = group[int(raw) - 1]
-                        plan.append((keep, [p for p in group if p is not keep]))
+                    parts = [p.strip() for p in raw.split(",")]
+                    indices = []
+                    valid = True
+                    for part in parts:
+                        if part.isdigit() and 1 <= int(part) <= len(group):
+                            idx = int(part) - 1
+                            if idx not in indices:
+                                indices.append(idx)
+                        else:
+                            valid = False
+                            break
+                    if valid and indices:
+                        keeps = [group[i] for i in indices]
+                        to_del = [p for p in group if p not in keeps]
+                        if to_del:
+                            plan.append((keeps, to_del))
                         break
                     print("  Invalid choice.")
             print()
         else:
             for group in filtered_groups:
                 ordered = sorted(group, key=sort_key)
-                plan.append((ordered[0], ordered[1:]))
+                plan.append(([ordered[0]], ordered[1:]))
 
     n_to_delete = len(auto_delete) + sum(len(d) for _, d in plan)
     if strategy_label:
         cprint(C.CYAN, f"  Preview — strategy: {strategy_label}")
     print()
-    for keep, to_del in plan:
-        cprint(C.GREEN, f"  KEEP    {keep.name}  ({keep.parent})")
+    for keeps, to_del in plan:
+        for keep in keeps:
+            cprint(C.GREEN, f"  KEEP    {keep.name}  ({keep.parent})")
         for p in to_del:
             cprint(C.RED, f"  DELETE  {p.name}  ({p.parent})")
     print()
@@ -3101,8 +3193,9 @@ def _prompt_delete_group(title: str,
             deleted += 1
         except OSError as e:
             cprint(C.YELLOW, f"  FAILED  {path}: {e}")
-    for keep, to_del in plan:
-        cprint(C.GREEN, f"  KEPT    {keep.name}")
+    for keeps, to_del in plan:
+        for keep in keeps:
+            cprint(C.GREEN, f"  KEPT    {keep.name}")
         for path in to_del:
             try:
                 path.unlink()
