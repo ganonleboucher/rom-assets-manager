@@ -2037,9 +2037,12 @@ def normalize_filename(filename: str) -> str:
     disc_match = _NRM_DISC_RE.search(base)
     disc_tag   = f" {disc_match.group(0)}" if disc_match else ""
     title = re.split(r'\s*[\(\[]', base)[0].strip()
-    m = _NRM_ARTICLE_RE.search(title)
+    # Split on subtitle separator so ", The" before " - Subtitle" is detected.
+    parts = re.split(r'\s+-\s+', title, maxsplit=1)
+    m = _NRM_ARTICLE_RE.search(parts[0])
     if m:
-        title = m.group(1) + ' ' + title[:m.start()].strip()
+        parts[0] = m.group(1) + ' ' + parts[0][:m.start()].strip()
+    title = ' - '.join(parts)
     title = re.sub(r'  +', ' ', title).strip()
     return title + disc_tag + ext
 
