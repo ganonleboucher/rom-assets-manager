@@ -2821,11 +2821,14 @@ def _prompt_delete_group(title: str,
                     print(f"    [{i}] {p.name}  ({sz:,} bytes)  ({p.parent})")
                 while True:
                     try:
-                        raw = input(f"  Keep which? (1-{len(group)}, or e.g. 1,3 to keep multiple, s=skip): ").strip().lower()
+                        raw = input(f"  Keep which? (1-{len(group)}, or e.g. 1,3 to keep multiple, s=skip, da=delete all): ").strip().lower()
                     except KeyboardInterrupt:
                         print()
                         raise
                     if raw == 's':
+                        break
+                    if raw == 'da':
+                        plan.append(([], list(group)))
                         break
                     parts = [p.strip() for p in raw.split(",")]
                     indices = []
